@@ -15,7 +15,7 @@
 
 param([switch]$Show)
 
-$Version = '1.2.0'
+$Version = '1.2.1'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -92,8 +92,10 @@ function Run-Tool([string]$exe, [string[]]$argList, [string]$cwd = '') {
 function Api([string]$path, $body) {
   $json = if ($null -eq $body) { '{}' } else { $body | ConvertTo-Json -Compress }
   $bytes = [Text.Encoding]::UTF8.GetBytes($json)
-  return Invoke-RestMethod -Method Post -Uri ($Server + $path) -Headers @{ Authorization = "Bearer $Code" } `
-    -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec 60 -UseBasicParsing
+  $res = Invoke-WebRequest -Method Post -Uri ($Server + $path) -Headers @{ Authorization = "Bearer $Code" } `
+    -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec 600 -UseBasicParsing
+  # Always read the reply as UTF-8 (Windows PowerShell 5.1 otherwise guesses Latin-1 and garbles curly quotes)
+  return ([Text.Encoding]::UTF8.GetString($res.RawContentStream.ToArray()) | ConvertFrom-Json)
 }
 
 function ApiError($err) {
