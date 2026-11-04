@@ -6,7 +6,7 @@ reels on Instagram. Sermon reels use the preacher's own voice and have no music.
 - **Scores:** the [Open Hymnal Project](https://github.com/mzealey/openhymnal) (marked public domain; taken from
   hymnals of 1861–1915: Excell's *Joy to the World* 1915, *Hymns Ancient and Modern* 1869, the *Northfield Hymnal*
   1904, *The Coronation* 1872, *Brightest and Best* 1874 and others). The four-part hymnal harmony is used as printed.
-- **Played with** the free FluidR3 GM piano sound (FluidSynth), softly, about 20% slower than written, three times
+- **Played with** the free FluidR3 GM piano sound (FluidSynth), softly, at the written speed ("When I Survey" and "Abide with Me" a little under), three times
   through, with gentle fades. All tracks are evened out to -22 LUFS.
 - Made Nov 4, 2026. If the church ever records its own piano player, those recordings can replace these files
   (same names) and the reels will use them automatically.
