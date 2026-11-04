@@ -29,58 +29,63 @@ reels on Instagram. Sermon reels also get one softly under the preacher's voice.
 | christ-arose.m4a | Christ Arose | the resurrection |
 
 
-## Instrumental beds for sermon reels (`bed-*.m4a`)
+## Instrumental beds for sermon reels (`gfc-*.m4a`)
 
-Soft instrumental music played under the preacher in sermon reels. New reels take the next one in turn
-(the list and order are in `youtube-manager/music.js`), and any reel can be switched on the admin page
+Soft piano hymn music played under the preacher in sermon reels. New reels take the next one in turn
+(the list is in `youtube-manager/music.js`), and any reel can be switched on the admin page
 (Change this reel → Music underneath).
 
-- **Source:** an hour-long royalty-free instrumental track supplied by the church on Nov 4, 2026 (16 pieces).
-  Source and licence/credit details: _to be added_.
-- **How they were cut:** at quiet points into 45–80 second parts. Parts that swell loudly or die away to
-  silence were left out, so every bed loops smoothly under speech. 0.8 s fade in, 1.5 s fade out,
-  80 Hz high-pass (the track has heavy sub-bass), -22 LUFS, AAC 128k.
+- **Source:** "Hymnal Instrumental Music | No Copyright | Free Download" by GFC – Gems For Christ on YouTube,
+  https://www.youtube.com/watch?v=gKuhRI9Wly0 (premiered Apr 5, 2021). Its description says: "No Copyright.
+  Free Download… Feel free to download and share it with everyone." No named licence or credit requirement.
+  Chosen by the church on Nov 4, 2026.
+- **How they were cut:** the 46-minute track runs without gaps, so it was cut at quiet dips into 45–80 second
+  parts (one part with a big swell and a short last part were left out). 0.8 s fade in, 1.5 s fade out,
+  60 Hz high-pass, -22 LUFS, AAC 128k.
+- These replaced earlier `bed-*` clips cut from a Taryn Harbridge album, which were removed on Nov 4, 2026
+  because those recordings are sold commercially.
 
-| File | From | Length | Feel | Starts at (in the original hour) |
-|---|---|---|---|---|
-| bed-01a.m4a | piece 1, part a | 52 s | gentle start, quiet | 0:03 |
-| bed-01b.m4a | piece 1, part b | 55 s | soft | 0:55 |
-| bed-01c.m4a | piece 1, part c | 52 s | fuller | 1:50 |
-| bed-02a.m4a | piece 2, part a | 53 s | gentle start, quiet | 3:52 |
-| bed-02b.m4a | piece 2, part b | 50 s | quiet | 4:45 |
-| bed-03a.m4a | piece 3, part a | 72 s | soft | 7:07 |
-| bed-03b.m4a | piece 3, part b | 73 s | soft | 8:19 |
-| bed-03c.m4a | piece 3, part c | 61 s | fuller | 9:32 |
-| bed-04a.m4a | piece 4, part a | 50 s | soft | 11:20 |
-| bed-04b.m4a | piece 4, part b | 56 s | soft | 12:10 |
-| bed-04c.m4a | piece 4, part c | 77 s | fuller | 13:06 |
-| bed-05a.m4a | piece 5, part a | 71 s | gentle start, soft | 15:05 |
-| bed-05b.m4a | piece 5, part b | 50 s | soft | 16:16 |
-| bed-05c.m4a | piece 5, part c | 56 s | fuller | 17:06 |
-| bed-06a.m4a | piece 6, part a | 50 s | gentle start, quiet | 18:47 |
-| bed-06c.m4a | piece 6, part c | 60 s | soft | 20:28 |
-| bed-07a.m4a | piece 7, part a | 56 s | gentle start, soft | 22:07 |
-| bed-07b.m4a | piece 7, part b | 50 s | fuller | 23:03 |
-| bed-08a.m4a | piece 8, part a | 76 s | gentle start, soft | 25:29 |
-| bed-08b.m4a | piece 8, part b | 51 s | soft | 26:45 |
-| bed-08c.m4a | piece 8, part c | 51 s | fuller | 27:36 |
-| bed-09a.m4a | piece 9, part a | 74 s | gentle start, soft | 29:33 |
-| bed-09b.m4a | piece 9, part b | 61 s | soft | 30:47 |
-| bed-10a.m4a | piece 10, part a | 50 s | quiet | 32:55 |
-| bed-10b.m4a | piece 10, part b | 58 s | soft | 33:45 |
-| bed-11a.m4a | piece 11, part a | 64 s | gentle start, quiet | 36:15 |
-| bed-11b.m4a | piece 11, part b | 77 s | soft | 37:19 |
-| bed-11c.m4a | piece 11, part c | 55 s | soft | 38:36 |
-| bed-11d.m4a | piece 11, part d | 68 s | soft | 39:31 |
-| bed-12a.m4a | piece 12, part a | 50 s | gentle start, quiet | 40:42 |
-| bed-12b.m4a | piece 12, part b | 66 s | fuller | 41:32 |
-| bed-12c.m4a | piece 12, part c | 77 s | fuller | 42:38 |
-| bed-13b.m4a | piece 13, part b | 55 s | soft | 45:53 |
-| bed-13c.m4a | piece 13, part c | 78 s | fuller | 46:48 |
-| bed-14a.m4a | piece 14, part a | 73 s | quiet | 49:11 |
-| bed-14b.m4a | piece 14, part b | 72 s | soft | 50:24 |
-| bed-15a.m4a | piece 15, part a | 70 s | gentle start, soft | 53:11 |
-| bed-15b.m4a | piece 15, part b | 72 s | soft | 54:21 |
-| bed-16a.m4a | piece 16, part a | 52 s | soft | 56:45 |
-| bed-16b.m4a | piece 16, part b | 63 s | soft | 57:37 |
-| bed-16c.m4a | piece 16, part c | 80 s | soft | 58:40 |
+| File | Length | Feel | Starts at (in the original) |
+|---|---|---|---|
+| gfc-01.m4a | 75 s | soft | 0:02 |
+| gfc-02.m4a | 52 s | soft | 1:17 |
+| gfc-03.m4a | 60 s | soft | 2:09 |
+| gfc-04.m4a | 57 s | soft | 3:09 |
+| gfc-05.m4a | 50 s | quiet | 5:19 |
+| gfc-06.m4a | 79 s | soft | 6:09 |
+| gfc-07.m4a | 67 s | soft | 7:28 |
+| gfc-08.m4a | 72 s | soft | 8:35 |
+| gfc-09.m4a | 76 s | soft | 9:47 |
+| gfc-10.m4a | 51 s | soft | 11:03 |
+| gfc-11.m4a | 51 s | soft | 11:54 |
+| gfc-12.m4a | 52 s | soft | 12:45 |
+| gfc-13.m4a | 53 s | soft | 13:37 |
+| gfc-14.m4a | 68 s | quiet | 14:30 |
+| gfc-15.m4a | 53 s | quiet | 15:38 |
+| gfc-16.m4a | 53 s | soft | 16:31 |
+| gfc-17.m4a | 62 s | soft | 17:24 |
+| gfc-18.m4a | 60 s | soft | 18:26 |
+| gfc-19.m4a | 55 s | soft | 19:26 |
+| gfc-20.m4a | 70 s | soft | 20:21 |
+| gfc-21.m4a | 69 s | soft | 21:31 |
+| gfc-22.m4a | 73 s | soft | 22:40 |
+| gfc-23.m4a | 62 s | soft | 23:53 |
+| gfc-24.m4a | 67 s | soft | 24:55 |
+| gfc-25.m4a | 51 s | quiet | 26:02 |
+| gfc-26.m4a | 53 s | quiet | 26:53 |
+| gfc-27.m4a | 50 s | quiet | 27:46 |
+| gfc-28.m4a | 54 s | soft | 28:36 |
+| gfc-29.m4a | 59 s | soft | 29:30 |
+| gfc-30.m4a | 78 s | soft | 30:29 |
+| gfc-31.m4a | 54 s | soft | 31:47 |
+| gfc-32.m4a | 51 s | soft | 32:41 |
+| gfc-33.m4a | 74 s | soft | 33:32 |
+| gfc-34.m4a | 59 s | fuller | 34:46 |
+| gfc-35.m4a | 54 s | soft | 35:45 |
+| gfc-36.m4a | 78 s | fuller | 36:39 |
+| gfc-37.m4a | 66 s | soft | 37:57 |
+| gfc-38.m4a | 71 s | soft | 39:03 |
+| gfc-39.m4a | 65 s | soft | 40:14 |
+| gfc-40.m4a | 76 s | fuller | 41:19 |
+| gfc-41.m4a | 76 s | fuller | 42:35 |
+| gfc-42.m4a | 73 s | fuller | 43:51 |
