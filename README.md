@@ -16,6 +16,9 @@ North Pole, Alaska. They are made and added automatically; you don't need to do 
 
 `podcast-cover.jpg` is the podcast's main cover (3000 × 3000).
 
+The same program also makes the church's **Instagram reels**: it fetches each sermon's captions for the YouTube Manager
+and renders the chosen moments as vertical videos (stored under Releases as `reels-<year>`). Fonts are in [`reels/fonts`](reels/fonts).
+
 ## Setting up a computer (or moving to a new one)
 
 See [windows/README.md](windows/README.md).

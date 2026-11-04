@@ -26,6 +26,8 @@ That's it. You can delete the `windows` folder from the Desktop afterwards; the 
   The admin page shows which part of the video was kept, and you can set exact times there for any sermon.
 - It updates itself once a day from this repository, so it never needs reinstalling for fixes.
 
+- It also makes the Instagram reels: it gets each sermon's captions, then renders the moments picked on the YouTube Manager
+  (about a minute each). The fonts download by themselves the first time.
 - It uses only free tools, downloaded from their official pages: yt-dlp, ffmpeg and deno.
 - It updates yt-dlp once a week, since YouTube changes often.
 - It runs at low priority and doesn't open any windows.

@@ -7,13 +7,15 @@
 #   3. evens out the volume and saves a small MP3 named after the video title (ffmpeg),
 #   4. sends the MP3 to the YouTube Manager, which stores it and adds it to the website and podcast,
 #   5. deletes its working files.
-# Nothing is kept on this computer except the program, its tools and a short log (log.txt).
+# It also makes Instagram reels (see "reels" below): it fetches YouTube's word-by-word captions so the
+# YouTube Manager can pick the teaching moments, then renders each moment as a vertical video with subtitles.
+# Nothing is kept on this computer except the program, its tools, two fonts and a short log (log.txt).
 #
 # Run it by hand to test:  right-click "Run now.cmd"  (or: powershell -ExecutionPolicy Bypass -File sermon-audio.ps1 -Show)
 
 param([switch]$Show)
 
-$Version = '1.1.2'
+$Version = '1.2.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -65,10 +67,11 @@ function Quote-Arg([string]$a) {
   return '"' + $e + '"'
 }
 
-# Runs a tool, waits, and returns @{ code; out; err }
-function Run-Tool([string]$exe, [string[]]$argList) {
+# Runs a tool, waits, and returns @{ code; out; err }  ($cwd: folder to run it in)
+function Run-Tool([string]$exe, [string[]]$argList, [string]$cwd = '') {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = Join-Path $Tools $exe
+  if ($cwd) { $psi.WorkingDirectory = $cwd }
   $psi.Arguments = ($argList | ForEach-Object { Quote-Arg $_ }) -join ' '
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
@@ -216,6 +219,116 @@ try {
 }
 $limit = [int]$hello.perSession
 if ($limit -lt 1) { $limit = 10 }
+
+# ---------- Instagram reels (done first: they're quick and someone is waiting to review them) ----------
+$FontDir = Join-Path $Dir 'reels-fonts'
+function Reel-Captions($job, [string]$work) {
+  # YouTube's captions with a time for every word (json3), English, automatic ones if nobody typed any
+  $cap = Run-Tool 'yt-dlp.exe' @('--skip-download', '--write-subs', '--write-auto-subs', '--sub-langs', 'en-orig,en,en-US,en-GB',
+    '--sub-format', 'json3', '--no-playlist', '--retries', '10', '--socket-timeout', '30',
+    '-o', (Join-Path $work 'cap.%(ext)s'), ('https://www.youtube.com/watch?v=' + $job.id))
+  $files = @(Get-ChildItem -Path $work -Filter 'cap*.json3')
+  if (-not $files.Count) {
+    if ($cap.code -ne 0) { throw ('Getting the captions failed: ' + (Last-Line $cap.err)) }
+    throw 'YouTube has no English captions for this video yet.'
+  }
+  $file = ($files | Sort-Object { if ($_.Name -like '*en-orig*') { 0 } elseif ($_.Name -like '*.en.*') { 1 } else { 2 } } | Select-Object -First 1)
+  $j = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8) | ConvertFrom-Json
+  $sb = New-Object Text.StringBuilder
+  $count = 0
+  foreach ($ev in $j.events) {
+    if (-not $ev.segs) { continue }
+    $t0 = [double]$ev.tStartMs
+    $dur = if ($ev.dDurationMs) { [double]$ev.dDurationMs } else { 2000 }
+    $segs = @($ev.segs | Where-Object { $_.utf8 -and $_.utf8.Trim() })
+    for ($k = 0; $k -lt $segs.Count; $k++) {
+      $st = $t0 + [double]$segs[$k].tOffsetMs
+      $en = if ($k + 1 -lt $segs.Count) { $t0 + [double]$segs[$k + 1].tOffsetMs } else { $t0 + $dur }
+      $ws = @($segs[$k].utf8.Trim() -split '\s+' | Where-Object { $_ })
+      for ($q = 0; $q -lt $ws.Count; $q++) {
+        $wt = $st + ($en - $st) * $q / $ws.Count
+        [void]$sb.Append(([Math]::Round($wt)).ToString($Inv)).Append("`t").Append($ws[$q]).Append("`n")
+        $count++
+      }
+    }
+  }
+  if ($count -lt 200) { throw "The captions have only $count words." }
+  $bytes = [Text.Encoding]::UTF8.GetBytes($sb.ToString())
+  $res = Invoke-RestMethod -Method Put -Uri ($Server + '/api/reels/captions?id=' + $job.id) -Headers @{ Authorization = "Bearer $Code" } `
+    -ContentType 'text/plain; charset=utf-8' -Body $bytes -TimeoutSec 600 -UseBasicParsing
+  Log "  Captions sent ($count words). Moments picked: $($res.clips)."
+}
+
+function Reel-Render($job, [string]$work) {
+  # fonts (kept between runs) and the church logo
+  if (-not (Test-Path $FontDir)) { New-Item -ItemType Directory -Path $FontDir | Out-Null }
+  $fonts = Join-Path $work 'fonts'
+  New-Item -ItemType Directory -Path $fonts | Out-Null
+  foreach ($f in $job.fonts) {
+    $have = Join-Path $FontDir $f.name
+    if (-not (Test-Path $have) -or (Get-Item $have).Length -lt 10000) { Invoke-WebRequest -Uri $f.url -OutFile $have -TimeoutSec 120 -UseBasicParsing }
+    Copy-Item $have (Join-Path $fonts $f.name)
+  }
+  $logo = Join-Path $work 'logo.png'
+  try { Invoke-WebRequest -Uri $job.logo -OutFile $logo -TimeoutSec 60 -UseBasicParsing } catch {}
+  if (-not (Test-Path $logo) -or (Get-Item $logo).Length -lt 500) {
+    [void](Run-Tool 'ffmpeg.exe' @('-hide_banner', '-y', '-f', 'lavfi', '-i', 'color=c=black@0.0:s=8x8,format=rgba', '-frames:v', '1', $logo))
+  }
+  [IO.File]::WriteAllText((Join-Path $work 'clip.ass'), [string]$job.ass, (New-Object Text.UTF8Encoding($false)))
+
+  # just this part of the video, up to 1080p
+  $section = '*' + (Str ([double]$job.start)) + '-' + (Str ([double]$job.end))
+  $dl = Run-Tool 'yt-dlp.exe' @(
+    '-f', 'bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b',
+    '--download-sections', $section, '--force-keyframes-at-cuts', '--merge-output-format', 'mp4',
+    '--no-playlist', '--no-progress', '--no-part', '--retries', '20', '--fragment-retries', '20', '--socket-timeout', '30',
+    '-o', (Join-Path $work 'src.%(ext)s'), ('https://www.youtube.com/watch?v=' + $job.id))
+  $src = Get-ChildItem -Path $work -Filter 'src.*' | Select-Object -First 1
+  if ($dl.code -ne 0 -or -not $src) { throw ('YouTube download failed: ' + (Last-Line $dl.err)) }
+
+  $out = Join-Path $work 'reel.mp4'
+  $enc = Run-Tool 'ffmpeg.exe' @('-hide_banner', '-nostats', '-y', '-i', $src.Name, '-i', 'logo.png',
+    '-filter_complex', [string]$job.filter, '-map', '[v]', '-map', '[a]', '-t', (Str ([double]$job.duration)),
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-profile:v', 'high', '-level', '4.1',
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', 'reel.mp4') $work
+  if ($enc.code -ne 0 -or -not (Test-Path $out) -or (Get-Item $out).Length -lt 50000) { throw ('Making the video failed: ' + (Last-Line $enc.err)) }
+
+  for ($try = 1; ; $try++) {
+    try {
+      Invoke-WebRequest -Method Put -Uri ($Server + '/api/reels/upload?id=' + $job.id + '&n=' + $job.n) -InFile $out -ContentType 'video/mp4' `
+        -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 1800 -UseBasicParsing | Out-Null
+      break
+    } catch {
+      $httpStatus = 0; try { $httpStatus = [int]$_.Exception.Response.StatusCode } catch {}
+      if ($try -ge 4 -or ($httpStatus -ge 400 -and $httpStatus -lt 500)) { throw }
+      Start-Sleep -Seconds (30 * $try)
+    }
+  }
+  Log "  Reel #$($job.n) made: $([Math]::Round([double]$job.duration)) seconds, $([Math]::Round((Get-Item $out).Length / 1MB, 1)) MB."
+}
+
+for ($n = 0; $n -lt 8; $n++) {
+  try { $r = Api '/api/reels/next' @{ version = $Version } } catch { if ($Show) { Log ('Reels: ' + (ApiError $_)) }; break }
+  $job = $r.job
+  if (-not $job) { break }
+  $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-reel-' + $job.id)
+  try {
+    if (Test-Path $work) { Remove-Item $work -Recurse -Force }
+    New-Item -ItemType Directory -Path $work | Out-Null
+    if ($job.type -eq 'captions') { Log "Reels: getting captions for $($job.title)"; Reel-Captions $job $work }
+    elseif ($job.type -eq 'render') { Log "Reels: making reel #$($job.n) from $($job.title)"; Reel-Render $job $work }
+    else { break }
+  } catch {
+    $msg = ApiError $_
+    Log "  Reel problem: $msg"
+    $body = @{ id = $job.id; error = $msg }
+    if ($job.type -eq 'render') { $body.n = $job.n }
+    try { Api '/api/reels/fail' $body | Out-Null } catch {}
+    if ($msg -match 'download failed|captions failed') { break }  # YouTube is probably blocking; try next hour
+  } finally {
+    if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+}
 
 # ---------- make audio ----------
 $made = 0
