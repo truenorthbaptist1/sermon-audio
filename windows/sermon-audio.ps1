@@ -15,7 +15,7 @@
 
 param([switch]$Show)
 
-$Version = '1.3.0'
+$Version = '1.3.1'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -282,6 +282,7 @@ function Prepare-Art($job, [string]$work) {
 function Post-Render($job, [string]$work) {
   Prepare-Art $job $work
   if ($job.bg) { Invoke-WebRequest -Uri $job.bg -OutFile (Join-Path $work 'bg.mp4') -TimeoutSec 600 -UseBasicParsing }
+  if ($job.music) { Invoke-WebRequest -Uri $job.music -OutFile (Join-Path $work 'music.m4a') -TimeoutSec 300 -UseBasicParsing }
   foreach ($o in $job.outputs) {
     [IO.File]::WriteAllText((Join-Path $work ('s' + $o.i + '.ass')), [string]$o.ass, (New-Object Text.UTF8Encoding($false)))
     $enc = Run-Tool 'ffmpeg.exe' ([string[]]$o.args) $work
