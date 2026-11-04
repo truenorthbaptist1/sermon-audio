@@ -21,6 +21,11 @@ That's it. You can delete the `windows` folder from the Desktop afterwards; the 
 
 ## Good to know
 
+- **Only the sermon is kept.** For whole-service recordings it finds the longest stretch of preaching (singing and
+  instruments have almost no pauses; preaching has constant short ones) and cuts the songs and announcements around it.
+  The admin page shows which part of the video was kept, and you can set exact times there for any sermon.
+- It updates itself once a day from this repository, so it never needs reinstalling for fixes.
+
 - It uses only free tools, downloaded from their official pages: yt-dlp, ffmpeg and deno.
 - It updates yt-dlp once a week, since YouTube changes often.
 - It runs at low priority and doesn't open any windows.

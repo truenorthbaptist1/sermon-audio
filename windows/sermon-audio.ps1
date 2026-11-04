@@ -13,7 +13,7 @@
 
 param([switch]$Show)
 
-$Version = '1.0.0'
+$Version = '1.1.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -106,6 +106,7 @@ function ApiError($err) {
   return $err.Exception.Message
 }
 
+function Clock([double]$sec) { $t = [TimeSpan]::FromSeconds([Math]::Round($sec)); if ($t.Hours) { return $t.ToString('h\:mm\:ss') } return $t.ToString('m\:ss') }
 function Num([string]$s) { return [double]::Parse($s, $Inv) }
 function Str([double]$n) { return $n.ToString('0.###', $Inv) }
 
@@ -113,6 +114,85 @@ function Last-Line([string]$text) {
   $lines = $text -split "`r?`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '^\[download\]|^\[youtube\]|^\[info\]' }
   if ($lines) { return ($lines | Select-Object -Last 2) -join ' ' }
   return 'no details'
+}
+
+# ---------- finding the sermon inside a whole-service recording ----------
+# Singing and instruments are almost continuous sound; preaching has constant short pauses between phrases.
+# Every 2 seconds we measure how much of the time is "pause" (compared to the loudness around it), smooth that
+# over 10 seconds, and take the longest stretch of speaking (short breaks of up to 30 seconds allowed).
+# That stretch is the sermon. If there is no stretch of at least 15 minutes, nothing is cut but the silence.
+Add-Type -Language CSharp -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.IO;
+public static class SermonFinder {
+  static int ReadFull(Stream s, byte[] b) {
+    int got = 0;
+    while (got < b.Length) { int r = s.Read(b, got, b.Length - got); if (r <= 0) break; got += r; }
+    return got;
+  }
+  // pcm: 16-bit mono little-endian at sampleRate. Returns {start, end} in seconds, or null.
+  public static double[] Find(string pcm, int sampleRate) {
+    int fl = sampleRate / 40;
+    List<float> en = new List<float>();
+    byte[] buf = new byte[fl * 2];
+    using (FileStream fs = File.OpenRead(pcm)) {
+      BufferedStream bs = new BufferedStream(fs, 1 << 20);
+      while (ReadFull(bs, buf) == buf.Length) {
+        double sum = 0;
+        for (int i = 0; i < fl; i++) { short v = (short)(buf[2 * i] | (buf[2 * i + 1] << 8)); double d = v / 32768.0; sum += d * d; }
+        en.Add((float)(10 * Math.Log10(sum / fl + 1e-10)));
+      }
+    }
+    int n = en.Count, S = 80, W = 400, m = n / S;
+    if (m < 10) return null;
+    double[] pause = new double[m], loud = new double[m];
+    for (int k = 0; k < m; k++) {
+      int c = k * S + S / 2, lo = Math.Max(0, c - W / 2), hi = Math.Min(n, c + W / 2);
+      float[] ctx = new float[hi - lo];
+      for (int i = lo; i < hi; i++) ctx[i - lo] = en[i];
+      Array.Sort(ctx);
+      double pos = (ctx.Length - 1) * 0.9; int ip = (int)Math.Floor(pos);
+      double p90 = ip + 1 < ctx.Length ? ctx[ip] + (ctx[ip + 1] - ctx[ip]) * (pos - ip) : ctx[ip];
+      int below = 0;
+      for (int i = k * S; i < (k + 1) * S; i++) if (en[i] < p90 - 18) below++;
+      pause[k] = (double)below / S; loud[k] = p90;
+    }
+    bool[] speech = new bool[m];
+    for (int k = 0; k < m; k++) {
+      double t = 0; for (int j = k - 2; j <= k + 2; j++) if (j >= 0 && j < m) t += pause[j];
+      speech[k] = t / 5 >= 0.10 && loud[k] > -50;
+    }
+    int bestA = -1, bestB = -1, start = -1, last = -1, gap = 0;
+    for (int k = 0; k <= m; k++) {
+      bool sp = k < m && speech[k];
+      if (sp) { if (start < 0) start = k; gap = 0; last = k; }
+      else if (start >= 0) {
+        gap++;
+        if (gap > 15 || k == m) { if (last - start > bestB - bestA) { bestA = start; bestB = last; } start = -1; }
+      }
+    }
+    if (bestA < 0 || (bestB + 1 - bestA) * 2 < 900) return null;
+    return new double[] { bestA * 2.0, (bestB + 1) * 2.0 };
+  }
+}
+"@
+
+# ---------- keep this program up to date (checks once a day; new version runs next time) ----------
+$selfStamp = Join-Path $Dir 'last-self-update.txt'
+if (-not (Test-Path $selfStamp) -or ((Get-Date) - (Get-Item $selfStamp).LastWriteTime).TotalHours -ge 20) {
+  try {
+    $newTmp = Join-Path $Dir 'sermon-audio.new.ps1'
+    Invoke-WebRequest 'https://raw.githubusercontent.com/truenorthbaptist1/sermon-audio/main/windows/sermon-audio.ps1' -OutFile $newTmp -UseBasicParsing -TimeoutSec 60
+    $newText = Get-Content $newTmp -Raw
+    $mine = $MyInvocation.MyCommand.Path
+    if ($newText -match "Version = '([\d.]+)'" -and ([version]$Matches[1] -gt [version]$Version) -and $newText -match 'SermonAudioEnd') {
+      Copy-Item $newTmp $mine -Force
+      Log "Program updated to version $($Matches[1]) (used from the next run)."
+    }
+    Remove-Item $newTmp -Force -ErrorAction SilentlyContinue
+  } catch {}
+  Set-Content -Path $selfStamp -Value (Get-Date -Format o)
 }
 
 # ---------- keep yt-dlp up to date (YouTube changes often) ----------
@@ -170,18 +250,31 @@ for ($n = 0; $n -lt $limit; $n++) {
     $total = Num ($probe.out.Trim())
     $start = 0.0
     $end = $total
+    $how = 'silence only'
     if ($null -eq $job.start -or $null -eq $job.end) {
-      $sd = Run-Tool 'ffmpeg.exe' @('-hide_banner', '-nostats', '-i', $src.FullName, '-af', 'silencedetect=noise=-45dB:d=3', '-f', 'null', '-')
-      $starts = @([regex]::Matches($sd.err, 'silence_start: ([\d.]+)') | ForEach-Object { Num $_.Groups[1].Value })
-      $ends = @([regex]::Matches($sd.err, 'silence_end: ([\d.]+)') | ForEach-Object { Num $_.Groups[1].Value })
-      # dead air right at the start
-      if ($starts.Count -and $ends.Count -and $starts[0] -lt 1) { $start = [Math]::Max(0, $ends[0] - 1) }
-      # dead air that runs to the very end
-      if ($starts.Count) {
-        $trailing = ($starts.Count -gt $ends.Count) -or ($ends.Count -and $ends[-1] -ge $total - 1)
-        if ($trailing -and $starts[-1] -gt $start + 60) { $end = [Math]::Min($total, $starts[-1] + 1.5) }
+      # whole-service recordings: keep only the sermon
+      $pcm = Join-Path $work 'pcm.raw'
+      $pc = Run-Tool 'ffmpeg.exe' @('-hide_banner', '-nostats', '-y', '-i', $src.FullName, '-ac', '1', '-ar', '8000', '-f', 's16le', $pcm)
+      $found = $null
+      if ($pc.code -eq 0) { try { $found = [SermonFinder]::Find($pcm, 8000) } catch { Log "  Couldn't look for the sermon: $($_.Exception.Message)" } }
+      Remove-Item $pcm -Force -ErrorAction SilentlyContinue
+      if ($found) {
+        $start = [Math]::Max(0, $found[0] - 1)
+        $end = [Math]::Min($total, $found[1] + 2)
+        $how = 'sermon found'
+      } else {
+        $sd = Run-Tool 'ffmpeg.exe' @('-hide_banner', '-nostats', '-i', $src.FullName, '-af', 'silencedetect=noise=-45dB:d=3', '-f', 'null', '-')
+        $starts = @([regex]::Matches($sd.err, 'silence_start: ([\d.]+)') | ForEach-Object { Num $_.Groups[1].Value })
+        $ends = @([regex]::Matches($sd.err, 'silence_end: ([\d.]+)') | ForEach-Object { Num $_.Groups[1].Value })
+        # dead air right at the start
+        if ($starts.Count -and $ends.Count -and $starts[0] -lt 1) { $start = [Math]::Max(0, $ends[0] - 1) }
+        # dead air that runs to the very end
+        if ($starts.Count) {
+          $trailing = ($starts.Count -gt $ends.Count) -or ($ends.Count -and $ends[-1] -ge $total - 1)
+          if ($trailing -and $starts[-1] -gt $start + 60) { $end = [Math]::Min($total, $starts[-1] + 1.5) }
+        }
       }
-    }
+    } else { $how = 'trim times from the admin page' }
     if ($null -ne $job.start) { $start = [double]$job.start }
     if ($null -ne $job.end) { $end = [Math]::Min($total, [double]$job.end) }
     if ($end - $start -lt 30 -and $null -eq $job.start -and $null -eq $job.end) { $start = 0; $end = $total }  # safety: never cut a sermon to nothing
@@ -225,7 +318,7 @@ for ($n = 0; $n -lt $limit; $n++) {
       -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 1800 -UseBasicParsing
     $mb = [Math]::Round((Get-Item $out).Length / 1MB, 1)
     $mins = [Math]::Round(($end - $start) / 60)
-    Log "  Done: $mins min, $mb MB (trimmed $([Math]::Round($start))s from the start, $([Math]::Round($total - $end))s from the end)"
+    Log "  Done: $mins min, $mb MB. Kept $(Clock $start) to $(Clock $end) of the video ($how)."
     $made++
   } catch {
     $msg = if ($stage -eq 'upload') { ApiError $_ } else { $_.Exception.Message }
@@ -238,3 +331,4 @@ for ($n = 0; $n -lt $limit; $n++) {
 }
 if ($made -or $Show) { Log "Finished: $made sermon(s) made this time." }
 $mutex.ReleaseMutex()
+# SermonAudioEnd (marks a complete download of this file)
