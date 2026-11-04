@@ -13,7 +13,7 @@
 
 param([switch]$Show)
 
-$Version = '1.1.0'
+$Version = '1.1.1'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -237,6 +237,7 @@ for ($n = 0; $n -lt $limit; $n++) {
     $stage = 'download'
     $dl = Run-Tool 'yt-dlp.exe' @(
       '-f', 'bestaudio[ext=m4a]/bestaudio/best', '--no-playlist', '--no-progress', '--no-part',
+      '--retries', '20', '--fragment-retries', '20', '--retry-sleep', '5', '--socket-timeout', '30',
       '-o', (Join-Path $work 'source.%(ext)s'), ('https://www.youtube.com/watch?v=' + $job.id))
     $src = Get-ChildItem -Path $work -Filter 'source.*' | Select-Object -First 1
     if ($dl.code -ne 0 -or -not $src) {
@@ -314,8 +315,20 @@ for ($n = 0; $n -lt $limit; $n++) {
     # 4. send it
     $stage = 'upload'
     $q = 'id=' + $job.id + '&duration=' + (Str ($end - $start)) + '&start=' + (Str $start) + '&end=' + (Str $end)
-    $res = Invoke-WebRequest -Method Put -Uri ($Server + '/api/audio/upload?' + $q) -InFile $out -ContentType 'audio/mpeg' `
-      -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 1800 -UseBasicParsing
+    # a short internet drop shouldn't waste the work: try the upload up to 5 times, waiting longer each time
+    for ($try = 1; ; $try++) {
+      try {
+        $res = Invoke-WebRequest -Method Put -Uri ($Server + '/api/audio/upload?' + $q) -InFile $out -ContentType 'audio/mpeg' `
+          -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 1800 -UseBasicParsing
+        break
+      } catch {
+        $why = ApiError $_
+        $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+        if ($try -ge 5 -or ($code -ge 400 -and $code -lt 500)) { throw }
+        Log "  Upload didn't go through ($why); trying again in $(30 * $try) seconds..."
+        Start-Sleep -Seconds (30 * $try)
+      }
+    }
     $mb = [Math]::Round((Get-Item $out).Length / 1MB, 1)
     $mins = [Math]::Round(($end - $start) / 60)
     Log "  Done: $mins min, $mb MB. Kept $(Clock $start) to $(Clock $end) of the video ($how)."
