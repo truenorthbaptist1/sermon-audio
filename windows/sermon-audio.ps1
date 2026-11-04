@@ -13,7 +13,7 @@
 
 param([switch]$Show)
 
-$Version = '1.1.1'
+$Version = '1.1.2'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -323,8 +323,8 @@ for ($n = 0; $n -lt $limit; $n++) {
         break
       } catch {
         $why = ApiError $_
-        $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
-        if ($try -ge 5 -or ($code -ge 400 -and $code -lt 500)) { throw }
+        $httpStatus = 0; try { $httpStatus = [int]$_.Exception.Response.StatusCode } catch {}
+        if ($try -ge 5 -or ($httpStatus -ge 400 -and $httpStatus -lt 500)) { throw }
         Log "  Upload didn't go through ($why); trying again in $(30 * $try) seconds..."
         Start-Sleep -Seconds (30 * $try)
       }
