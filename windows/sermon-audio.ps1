@@ -15,7 +15,7 @@
 
 param([switch]$Show)
 
-$Version = '1.3.1'
+$Version = '1.3.2'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -318,11 +318,17 @@ function Reel-Render($job, [string]$work) {
   $src = Get-ChildItem -Path $work -Filter 'src.*' | Select-Object -First 1
   if ($dl.code -ne 0 -or -not $src) { throw ('YouTube download failed: ' + (Last-Line $dl.err)) }
 
+  # a very soft hymn underneath (when the manager asks for one)
+  $musicArgs = @()
+  if ($job.music) {
+    Invoke-WebRequest -Uri $job.music -OutFile (Join-Path $work 'music.m4a') -TimeoutSec 300 -UseBasicParsing
+    $musicArgs = @('-stream_loop', '-1', '-i', 'music.m4a')
+  }
   $out = Join-Path $work 'reel.mp4'
-  $enc = Run-Tool 'ffmpeg.exe' @('-hide_banner', '-nostats', '-y', '-i', $src.Name, '-i', 'logo.png',
+  $enc = Run-Tool 'ffmpeg.exe' (@('-hide_banner', '-nostats', '-y', '-i', $src.Name, '-i', 'logo.png') + $musicArgs + @(
     '-filter_complex', [string]$job.filter, '-map', '[v]', '-map', '[a]', '-t', (Str ([double]$job.duration)),
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-profile:v', 'high', '-level', '4.1',
-    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', 'reel.mp4') $work
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', 'reel.mp4')) $work
   if ($enc.code -ne 0 -or -not (Test-Path $out) -or (Get-Item $out).Length -lt 50000) { throw ('Making the video failed: ' + (Last-Line $enc.err)) }
 
   for ($try = 1; ; $try++) {
