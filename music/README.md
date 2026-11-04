@@ -1,15 +1,17 @@
 # Hymn music for the Scripture and question reels
 
 Soft piano versions of public-domain hymn tunes, played under the verses in the church's Scripture and question
-reels on Instagram. Sermon reels use the preacher's own voice and have no music.
+reels on Instagram. Sermon reels also get one softly under the preacher's voice.
 
-- **Scores:** the [Open Hymnal Project](https://github.com/mzealey/openhymnal) (marked public domain; taken from
-  hymnals of 1861–1915: Excell's *Joy to the World* 1915, *Hymns Ancient and Modern* 1869, the *Northfield Hymnal*
-  1904, *The Coronation* 1872, *Brightest and Best* 1874 and others). The four-part hymnal harmony is used as printed.
-- **Played with** the free FluidR3 GM piano sound (FluidSynth), softly, at the written speed ("When I Survey" and "Abide with Me" a little under), three times
-  through, with gentle fades. All tracks are evened out to -22 LUFS.
-- Made Nov 4, 2026. If the church ever records its own piano player, those recordings can replace these files
-  (same names) and the reels will use them automatically.
+- **Recordings:** by Clyde McLennan (1941–2022), a Baptist pastor, from [SmallChurchMusic.com](https://www.smallchurchmusic.com/),
+  which lists his recordings as public domain and free to download. "Simple Piano" versions (made from the hymnal scores
+  with virtual instruments). Only his recordings are used, not those of other contributors to the site.
+  The list and source links are in `scm-hymns.json`; the workflow `.github/workflows/scm-music.yml` downloads them,
+  trims silence, adds a short fade in and evens them out to -22 LUFS. Run it with version `alt` for the
+  "Piano & Instrumental" versions instead.
+- Switched Nov 4, 2026. The earlier FluidR3 versions (made from Open Hymnal Project scores) are kept in `fluidr3/`.
+- If the church ever records its own piano player, those recordings can replace these files (same names) and the
+  reels will use them automatically.
 
 | File | Hymn (tune) | Used for |
 |---|---|---|
