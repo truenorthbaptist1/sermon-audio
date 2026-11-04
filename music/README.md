@@ -4,11 +4,11 @@ Soft piano versions of public-domain hymn tunes, played under the verses in the 
 reels on Instagram. Sermon reels also get one softly under the preacher's voice.
 
 - **Recordings:** by Clyde McLennan (1941–2022), a Baptist pastor, from [SmallChurchMusic.com](https://www.smallchurchmusic.com/),
-  which lists his recordings as public domain and free to download. "Simple Piano" versions (made from the hymnal scores
+  which lists his recordings as public domain and free to download. "Piano & Instrumental" versions (made from the hymnal scores
   with virtual instruments). Only his recordings are used, not those of other contributors to the site.
   The list and source links are in `scm-hymns.json`; the workflow `.github/workflows/scm-music.yml` downloads them,
-  trims silence, adds a short fade in and evens them out to -22 LUFS. Run it with version `alt` for the
-  "Piano & Instrumental" versions instead.
+  trims silence, adds a short fade in and evens them out to -22 LUFS. In use: version `alt` (Piano & Instrumental, chosen Nov 4).
+  Run it with version `main` for the plainer "Simple Piano" versions.
 - Switched Nov 4, 2026. The earlier FluidR3 versions (made from Open Hymnal Project scores) are kept in `fluidr3/`.
 - If the church ever records its own piano player, those recordings can replace these files (same names) and the
   reels will use them automatically.
