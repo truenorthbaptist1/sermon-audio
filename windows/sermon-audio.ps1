@@ -15,7 +15,7 @@
 
 param([switch]$Show)
 
-$Version = '1.2.1'
+$Version = '1.3.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -261,8 +261,8 @@ function Reel-Captions($job, [string]$work) {
   Log "  Captions sent ($count words). Moments picked: $($res.clips)."
 }
 
-function Reel-Render($job, [string]$work) {
-  # fonts (kept between runs) and the church logo
+# Fonts (kept between runs) and the church logo, copied into the job's working folder
+function Prepare-Art($job, [string]$work) {
   if (-not (Test-Path $FontDir)) { New-Item -ItemType Directory -Path $FontDir | Out-Null }
   $fonts = Join-Path $work 'fonts'
   New-Item -ItemType Directory -Path $fonts | Out-Null
@@ -276,6 +276,35 @@ function Reel-Render($job, [string]$work) {
   if (-not (Test-Path $logo) -or (Get-Item $logo).Length -lt 500) {
     [void](Run-Tool 'ffmpeg.exe' @('-hide_banner', '-y', '-f', 'lavfi', '-i', 'color=c=black@0.0:s=8x8,format=rgba', '-frames:v', '1', $logo))
   }
+}
+
+# Scripture and question posts: images, carousel slides or a short reel, drawn exactly as the manager says
+function Post-Render($job, [string]$work) {
+  Prepare-Art $job $work
+  if ($job.bg) { Invoke-WebRequest -Uri $job.bg -OutFile (Join-Path $work 'bg.mp4') -TimeoutSec 600 -UseBasicParsing }
+  foreach ($o in $job.outputs) {
+    [IO.File]::WriteAllText((Join-Path $work ('s' + $o.i + '.ass')), [string]$o.ass, (New-Object Text.UTF8Encoding($false)))
+    $enc = Run-Tool 'ffmpeg.exe' ([string[]]$o.args) $work
+    $file = Join-Path $work ('out' + $o.i + '.' + $o.ext)
+    if ($enc.code -ne 0 -or -not (Test-Path $file) -or (Get-Item $file).Length -lt 5000) { throw ('Making the picture failed: ' + (Last-Line $enc.err)) }
+    $type = if ($o.ext -eq 'jpg') { 'image/jpeg' } else { 'video/mp4' }
+    for ($try = 1; ; $try++) {
+      try {
+        Invoke-WebRequest -Method Put -Uri ($Server + '/api/posts/upload?id=' + [uri]::EscapeDataString($job.id) + '&i=' + $o.i) -InFile $file -ContentType $type `
+          -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 1800 -UseBasicParsing | Out-Null
+        break
+      } catch {
+        $httpStatus = 0; try { $httpStatus = [int]$_.Exception.Response.StatusCode } catch {}
+        if ($try -ge 4 -or ($httpStatus -ge 400 -and $httpStatus -lt 500)) { throw }
+        Start-Sleep -Seconds (30 * $try)
+      }
+    }
+  }
+  Log "  Made $($job.outputs.Count) file(s) for $($job.title)."
+}
+
+function Reel-Render($job, [string]$work) {
+  Prepare-Art $job $work
   [IO.File]::WriteAllText((Join-Path $work 'clip.ass'), [string]$job.ass, (New-Object Text.UTF8Encoding($false)))
 
   # just this part of the video, up to 1080p
@@ -313,19 +342,21 @@ for ($n = 0; $n -lt 8; $n++) {
   try { $r = Api '/api/reels/next' @{ version = $Version } } catch { if ($Show) { Log ('Reels: ' + (ApiError $_)) }; break }
   $job = $r.job
   if (-not $job) { break }
-  $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-reel-' + $job.id)
+  $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-reel-' + ($job.id -replace '[^\w-]', ''))
   try {
     if (Test-Path $work) { Remove-Item $work -Recurse -Force }
     New-Item -ItemType Directory -Path $work | Out-Null
     if ($job.type -eq 'captions') { Log "Reels: getting captions for $($job.title)"; Reel-Captions $job $work }
     elseif ($job.type -eq 'render') { Log "Reels: making reel #$($job.n) from $($job.title)"; Reel-Render $job $work }
+    elseif ($job.type -eq 'post') { Log "Posts: making the $($job.title)"; Post-Render $job $work }
     else { break }
   } catch {
     $msg = ApiError $_
     Log "  Reel problem: $msg"
     $body = @{ id = $job.id; error = $msg }
     if ($job.type -eq 'render') { $body.n = $job.n }
-    try { Api '/api/reels/fail' $body | Out-Null } catch {}
+    $failPath = if ($job.type -eq 'post') { '/api/posts/fail' } else { '/api/reels/fail' }
+    try { Api $failPath $body | Out-Null } catch {}
     if ($msg -match 'download failed|captions failed') { break }  # YouTube is probably blocking; try next hour
   } finally {
     if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
