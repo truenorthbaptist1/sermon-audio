@@ -1,0 +1,40 @@
+# For sermon-audio/.github/workflows/scm-music.yml (run by hand: Actions → "SmallChurchMusic hymns" → Run workflow).
+# Downloads the Clyde McLennan piano recordings listed in music/scm-hymns.json,
+# makes the soft reel versions in music/<key>.m4a, and keeps the old FluidR3 files in music/fluidr3/.
+name: SmallChurchMusic hymns
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "main (Simple Piano) or alt (Piano & Instrumental)"
+        default: main
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg jq
+      - name: Download and soften
+        run: |
+          set -euo pipefail
+          mkdir -p music/fluidr3 dl
+          for f in music/*.m4a; do [ -e "music/fluidr3/$(basename "$f")" ] || cp "$f" music/fluidr3/; done
+          jq -c '.hymns[]' music/scm-hymns.json | while read -r h; do
+            key=$(jq -r .key <<<"$h"); url=$(jq -r ".${{ inputs.version }}" <<<"$h")
+            echo "== $key  $url"
+            curl -fsSL -A "TNBC-reels/1.0 (church use)" -o "dl/$key.mp3" "$url"
+            # Same loudness as the old files (-22 LUFS); trim silence at the start and end; short fades.
+            ffmpeg -nostdin -y -i "dl/$key.mp3" -af \
+              "silenceremove=start_periods=1:start_threshold=-50dB,areverse,silenceremove=start_periods=1:start_threshold=-50dB,areverse,highpass=f=60,lowpass=f=9000,afade=t=in:d=1,loudnorm=I=-22:TP=-3:LRA=11" \
+              -ar 44100 -ac 2 -c:a aac -b:a 128k "music/$key.m4a"
+            sleep 3
+          done
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git add music
+          git commit -m "Reel hymns: SmallChurchMusic piano recordings (Clyde McLennan)" || echo "nothing to commit"
+          git push
