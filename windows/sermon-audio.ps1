@@ -1,0 +1,240 @@
+# True North Baptist Church - Sermon audio maker (runs on the church's home computer)
+#
+# Every hour while the computer is on (and a few minutes after signing in), Windows runs this script.
+# It asks the YouTube Manager which sermons need audio, and for each one:
+#   1. downloads only the audio track from YouTube (yt-dlp),
+#   2. finds the dead air at the start and end and trims it (or uses the trim times set on the admin page),
+#   3. evens out the volume and saves a small MP3 named after the video title (ffmpeg),
+#   4. sends the MP3 to the YouTube Manager, which stores it and adds it to the website and podcast,
+#   5. deletes its working files.
+# Nothing is kept on this computer except the program, its tools and a short log (log.txt).
+#
+# Run it by hand to test:  right-click "Run now.cmd"  (or: powershell -ExecutionPolicy Bypass -File sermon-audio.ps1 -Show)
+
+param([switch]$Show)
+
+$Version = '1.0.0'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$Inv = [Globalization.CultureInfo]::InvariantCulture
+
+$Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Tools = Join-Path $Dir 'tools'
+$LogFile = Join-Path $Dir 'log.txt'
+$env:PATH = "$Tools;$env:PATH"   # yt-dlp finds deno (needed for YouTube) here too
+
+function Log([string]$m) {
+  $line = '{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m
+  Add-Content -Path $LogFile -Value $line -Encoding UTF8
+  if ($Show) { Write-Host $line }
+}
+
+# Keep the log short
+if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt 1MB) {
+  $keep = Get-Content $LogFile -Tail 3000
+  Set-Content -Path $LogFile -Value $keep -Encoding UTF8
+}
+
+# Only one copy at a time
+$mutex = New-Object System.Threading.Mutex($false, 'Local\TNBCSermonAudio')
+if (-not $mutex.WaitOne(0)) { if ($Show) { Write-Host 'Already running.' }; exit 0 }
+
+# Stay out of the way of whatever else the computer is doing
+try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch {}
+
+# ---------- settings ----------
+$cfgPath = Join-Path $Dir 'config.json'
+if (-not (Test-Path $cfgPath)) { Log 'Not set up yet: run Install.cmd.'; exit 1 }
+$cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+$Server = $cfg.server.TrimEnd('/')
+try {
+  $sec = $cfg.code | ConvertTo-SecureString
+  $Code = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+} catch {
+  Log 'The saved computer code could not be read (was the program copied from another Windows user?). Run Install.cmd again.'
+  exit 1
+}
+
+# ---------- helpers ----------
+function Quote-Arg([string]$a) {
+  if ($a -eq '') { return '""' }
+  if ($a -notmatch '[\s"]') { return $a }
+  $e = $a -replace '(\\*)"', '$1$1\"'
+  $e = $e -replace '(\\+)$', '$1$1'
+  return '"' + $e + '"'
+}
+
+# Runs a tool, waits, and returns @{ code; out; err }
+function Run-Tool([string]$exe, [string[]]$argList) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = Join-Path $Tools $exe
+  $psi.Arguments = ($argList | ForEach-Object { Quote-Arg $_ }) -join ' '
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  [void]$p.Start()
+  try { $p.PriorityClass = 'BelowNormal' } catch {}
+  $o = $p.StandardOutput.ReadToEndAsync()
+  $e = $p.StandardError.ReadToEndAsync()
+  $p.WaitForExit()
+  return @{ code = $p.ExitCode; out = $o.Result; err = $e.Result }
+}
+
+function Api([string]$path, $body) {
+  $json = if ($null -eq $body) { '{}' } else { $body | ConvertTo-Json -Compress }
+  $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+  return Invoke-RestMethod -Method Post -Uri ($Server + $path) -Headers @{ Authorization = "Bearer $Code" } `
+    -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec 60 -UseBasicParsing
+}
+
+function ApiError($err) {
+  try { if ($err.ErrorDetails -and $err.ErrorDetails.Message) { $j = $err.ErrorDetails.Message | ConvertFrom-Json; if ($j.error) { return $j.error } } } catch {}
+  try {
+    $r = $err.Exception.Response
+    if ($r) {
+      $sr = New-Object IO.StreamReader($r.GetResponseStream())
+      $j = $sr.ReadToEnd() | ConvertFrom-Json
+      if ($j.error) { return $j.error }
+    }
+  } catch {}
+  return $err.Exception.Message
+}
+
+function Num([string]$s) { return [double]::Parse($s, $Inv) }
+function Str([double]$n) { return $n.ToString('0.###', $Inv) }
+
+function Last-Line([string]$text) {
+  $lines = $text -split "`r?`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '^\[download\]|^\[youtube\]|^\[info\]' }
+  if ($lines) { return ($lines | Select-Object -Last 2) -join ' ' }
+  return 'no details'
+}
+
+# ---------- keep yt-dlp up to date (YouTube changes often) ----------
+$stamp = Join-Path $Tools 'last-update.txt'
+$needUpdate = -not (Test-Path $stamp) -or ((Get-Date) - (Get-Item $stamp).LastWriteTime).TotalDays -ge 7
+if ($needUpdate) {
+  $u = Run-Tool 'yt-dlp.exe' @('-U')
+  Log ('Checked for a yt-dlp update: ' + (Last-Line ($u.out + "`n" + $u.err)))
+  Set-Content -Path $stamp -Value (Get-Date -Format o)
+}
+
+# ---------- say hello (also checks the internet is there) ----------
+$ytv = (Run-Tool 'yt-dlp.exe' @('--version')).out.Trim()
+try {
+  $hello = Api '/api/audio/hello' @{ version = $Version; tools = "yt-dlp $ytv" }
+} catch {
+  $msg = ApiError $_
+  if ($msg -match 'not valid') { Log "The YouTube Manager doesn't accept this computer's code: $msg" }
+  elseif ($Show) { Log "Couldn't reach the YouTube Manager (no internet?): $msg" }
+  exit 0
+}
+$limit = [int]$hello.perSession
+if ($limit -lt 1) { $limit = 10 }
+
+# ---------- make audio ----------
+$made = 0
+for ($n = 0; $n -lt $limit; $n++) {
+  try { $r = Api '/api/audio/next' @{ version = $Version; tools = "yt-dlp $ytv" } }
+  catch { Log ('Could not ask for the next sermon: ' + (ApiError $_)); break }
+  $job = $r.job
+  if (-not $job) { break }
+
+  $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-audio-' + $job.id)
+  $stage = 'starting'
+  $stopAfter = $false
+  try {
+    if (Test-Path $work) { Remove-Item $work -Recurse -Force }
+    New-Item -ItemType Directory -Path $work | Out-Null
+    Log "Working on: $($job.title)"
+
+    # 1. audio only from YouTube
+    $stage = 'download'
+    $dl = Run-Tool 'yt-dlp.exe' @(
+      '-f', 'bestaudio[ext=m4a]/bestaudio/best', '--no-playlist', '--no-progress', '--no-part',
+      '-o', (Join-Path $work 'source.%(ext)s'), ('https://www.youtube.com/watch?v=' + $job.id))
+    $src = Get-ChildItem -Path $work -Filter 'source.*' | Select-Object -First 1
+    if ($dl.code -ne 0 -or -not $src) {
+      $stopAfter = $true  # if YouTube is blocking downloads, the next ones would fail too
+      throw ('YouTube download failed: ' + (Last-Line $dl.err))
+    }
+
+    # 2. where the sermon starts and ends
+    $stage = 'trim'
+    $probe = Run-Tool 'ffprobe.exe' @('-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', $src.FullName)
+    $total = Num ($probe.out.Trim())
+    $start = 0.0
+    $end = $total
+    if ($null -eq $job.start -or $null -eq $job.end) {
+      $sd = Run-Tool 'ffmpeg.exe' @('-hide_banner', '-nostats', '-i', $src.FullName, '-af', 'silencedetect=noise=-45dB:d=3', '-f', 'null', '-')
+      $starts = @([regex]::Matches($sd.err, 'silence_start: ([\d.]+)') | ForEach-Object { Num $_.Groups[1].Value })
+      $ends = @([regex]::Matches($sd.err, 'silence_end: ([\d.]+)') | ForEach-Object { Num $_.Groups[1].Value })
+      # dead air right at the start
+      if ($starts.Count -and $ends.Count -and $starts[0] -lt 1) { $start = [Math]::Max(0, $ends[0] - 1) }
+      # dead air that runs to the very end
+      if ($starts.Count) {
+        $trailing = ($starts.Count -gt $ends.Count) -or ($ends.Count -and $ends[-1] -ge $total - 1)
+        if ($trailing -and $starts[-1] -gt $start + 60) { $end = [Math]::Min($total, $starts[-1] + 1.5) }
+      }
+    }
+    if ($null -ne $job.start) { $start = [double]$job.start }
+    if ($null -ne $job.end) { $end = [Math]::Min($total, [double]$job.end) }
+    if ($end - $start -lt 30 -and $null -eq $job.start -and $null -eq $job.end) { $start = 0; $end = $total }  # safety: never cut a sermon to nothing
+    if ($end -le $start) { throw "The trim times leave nothing (start $(Str $start)s, end $(Str $end)s). Fix them on the admin page." }
+
+    # Artwork for the MP3: the series thumbnail (or the church cover), placed on a square background
+    $artFile = Join-Path $work 'art.jpg'
+    $haveArt = $false
+    foreach ($u in @($job.art, $job.artFallback)) {
+      if (-not $u -or $haveArt) { continue }
+      try { Invoke-WebRequest -Uri $u -OutFile $artFile -TimeoutSec 60 -UseBasicParsing; $haveArt = (Get-Item $artFile).Length -gt 2000 } catch {}
+    }
+
+    # 3. MP3: mono 64 kbps (good for speech, ~30 MB an hour), volume evened out, title and series inside the file
+    $stage = 'convert'
+    $out = Join-Path $work 'sermon.mp3'
+    $artArgs = @()
+    if ($haveArt) {
+      $artArgs = @('-i', $artFile, '-map', '0:a', '-map', '1:v', '-c:v', 'mjpeg', '-q:v', '3',
+        '-vf', 'scale=1000:1000:force_original_aspect_ratio=decrease,pad=1000:1000:(ow-iw)/2:(oh-ih)/2:color=0x13233a',
+        '-disposition:v:0', 'attached_pic', '-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)')
+    }
+    $enc = Run-Tool 'ffmpeg.exe' (@(
+      '-hide_banner', '-nostats', '-y', '-ss', (Str $start), '-to', (Str $end), '-i', $src.FullName) + $artArgs + @(
+      '-af', 'loudnorm=I=-19:TP=-1.5:LRA=11', '-ac', '1', '-ar', '44100', '-c:a', 'libmp3lame', '-b:a', '64k',
+      '-id3v2_version', '3', '-write_xing', '1',
+      '-metadata', ('title=' + $job.title), '-metadata', ('artist=' + $job.artist), '-metadata', ('album_artist=' + $job.artist),
+      '-metadata', ('album=' + $job.album), '-metadata', ('date=' + ([string]$job.date + '    ').Substring(0, 4).Trim()),
+      '-metadata', ('comment=' + $job.comment), '-metadata', 'genre=Sermon', $out))
+    if ($enc.code -ne 0 -or -not (Test-Path $out) -or (Get-Item $out).Length -lt 20000) {
+      throw ('Converting to MP3 failed: ' + (Last-Line $enc.err))
+    }
+    # A copy under the video's own title, in case anyone opens the working folder
+    $named = Join-Path $work $job.filename
+    try { Copy-Item $out $named -ErrorAction SilentlyContinue } catch {}
+
+    # 4. send it
+    $stage = 'upload'
+    $q = 'id=' + $job.id + '&duration=' + (Str ($end - $start)) + '&start=' + (Str $start) + '&end=' + (Str $end)
+    $res = Invoke-WebRequest -Method Put -Uri ($Server + '/api/audio/upload?' + $q) -InFile $out -ContentType 'audio/mpeg' `
+      -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 1800 -UseBasicParsing
+    $mb = [Math]::Round((Get-Item $out).Length / 1MB, 1)
+    $mins = [Math]::Round(($end - $start) / 60)
+    Log "  Done: $mins min, $mb MB (trimmed $([Math]::Round($start))s from the start, $([Math]::Round($total - $end))s from the end)"
+    $made++
+  } catch {
+    $msg = if ($stage -eq 'upload') { ApiError $_ } else { $_.Exception.Message }
+    Log "  Problem ($stage): $msg"
+    try { Api '/api/audio/fail' @{ id = $job.id; error = "$stage`: $msg" } | Out-Null } catch {}
+    if ($stopAfter) { Log '  Stopping for now; will try again next hour.'; break }
+  } finally {
+    if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+}
+if ($made -or $Show) { Log "Finished: $made sermon(s) made this time." }
+$mutex.ReleaseMutex()
