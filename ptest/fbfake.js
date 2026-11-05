@@ -1,5 +1,5 @@
 const http = require('http'); const fs = require('fs'); const path = require('path'); let got = [];
-const field = (s, n) => { const m = s.match(new RegExp('name="?' + n + '"?\\r\\n(?:[^\\r]*\\r\\n)*\\r\\n([^\\r]*)')); return m ? m[1] : null; };
+const field = (s, n) => { const m = s.match(new RegExp('name="?' + n + '"?\\r\\n(?:[^\\r]*\\r\\n)*?\\r\\n([^\\r]*)')); return m ? m[1] : null; };
 let size = 0, received = 0; const CH = 1 << 20;
 http.createServer((req, res) => { const parts = []; req.on('data', (d) => parts.push(d)); req.on('end', () => {
   const buf = Buffer.concat(parts); const s = buf.toString('latin1');

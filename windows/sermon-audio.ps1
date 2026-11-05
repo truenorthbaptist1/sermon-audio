@@ -481,11 +481,11 @@ function Reel-Render($job, [string]$work) {
 # "Listen to more!" end card with the website, the series thumbnail as the cover, and the manager's caption.
 function Fb-Form($client, [string]$url, [hashtable]$fields, [byte[]]$chunk) {
   $form = New-Object System.Net.Http.MultipartFormDataContent
-  foreach ($k in $fields.Keys) { $form.Add((New-Object System.Net.Http.StringContent([string]$fields[$k], [Text.Encoding]::UTF8)), $k) }
+  foreach ($k in $fields.Keys) { $form.Add((New-Object System.Net.Http.StringContent([string]$fields[$k], [Text.Encoding]::UTF8)), ('"' + $k + '"')) }   # quoted names: some servers want them
   if ($chunk) {
     $bc = New-Object System.Net.Http.ByteArrayContent(, $chunk)
     $bc.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/octet-stream')
-    $form.Add($bc, 'video_file_chunk', 'chunk.mp4')
+    $form.Add($bc, '"video_file_chunk"', '"chunk.mp4"')
   }
   $resp = $client.PostAsync($url, $form).Result
   $text = $resp.Content.ReadAsStringAsync().Result
@@ -569,11 +569,11 @@ function FB-Video($job, [string]$work) {
     if ((Test-Path $thumb) -and (Get-Item $thumb).Length -gt 5000) {
       try {
         $form = New-Object System.Net.Http.MultipartFormDataContent
-        $form.Add((New-Object System.Net.Http.StringContent($tok)), 'access_token')
-        $form.Add((New-Object System.Net.Http.StringContent('true')), 'is_preferred')
+        $form.Add((New-Object System.Net.Http.StringContent($tok)), '"access_token"')
+        $form.Add((New-Object System.Net.Http.StringContent('true')), '"is_preferred"')
         $ic = New-Object System.Net.Http.ByteArrayContent(, [IO.File]::ReadAllBytes($thumb))
         $ic.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('image/jpeg')
-        $form.Add($ic, 'source', 'thumb.jpg')
+        $form.Add($ic, '"source"', '"thumb.jpg"')
         $tr2 = $client.PostAsync("$graphHost/$($job.page.api)/$videoId/thumbnails", $form).Result
         if (-not $tr2.IsSuccessStatusCode) { Log ('  Cover picture not set: ' + $tr2.Content.ReadAsStringAsync().Result) }
       } catch { Log ('  Cover picture not set: ' + $_.Exception.Message) }
