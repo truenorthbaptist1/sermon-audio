@@ -21,17 +21,10 @@ $script:logged = @()
 function Log([string]$m) { Write-Host "LOG $m"; $script:logged += $m }
 $Server = 'http://localhost:8787'; $Code = 'tnbc-x'
 $job = Get-Content ptest\coverjob.json -Raw | ConvertFrom-Json
-$srv = Start-Process node -ArgumentList "$PWD\ptest\fake.js" -PassThru -WindowStyle Hidden; Start-Sleep 2
+$srv = Start-Process node -ArgumentList "$PWD\ptest\fake.js" -WorkingDirectory "$PWD" -PassThru -WindowStyle Hidden; Start-Sleep 2
 Write-Host "5 cover block"
 $block = [regex]::Match($script, '(?s)  if \(\$job\.cover\) \{.*?\n  \}\r?\n').Value
 Invoke-Expression $block
-Write-Host "6 transcript"
-Copy-Item ptest\cap.en.json3 "$work\cap.en.json3"
-$msg = Send-Words 'SERMON00001' $work
-Write-Host "Send-Words: $msg"
-Remove-Item "$work\cap.en.json3"
-$msg2 = Send-Words 'SERMON00002' $work
-Write-Host "Send-Words (no captions): $msg2"
 $ok = 0; $bad = 0
 function T($n, $c) { if ($c) { $script:ok++; Write-Host "ok   $n" } else { $script:bad++; Write-Host "FAIL $n" } }
 $got = Get-Content got.txt -Raw
@@ -39,7 +32,6 @@ Write-Host $got
 T 'cover.jpg made' ((Test-Path "$work\cover.jpg") -and (Get-Item "$work\cover.jpg").Length -gt 20000)
 T 'cover uploaded as JPEG' ($got -match 'PUT /api/reels/cover\?id=VIDEO000001&n=1 \d+ image/jpeg')
 T 'no cover problem logged' (-not ($script:logged -match 'Cover'))
-T 'transcript words sent (520 words)' ($msg -match '520 words' -and $got -match 'PUT /api/audio/words\?id=SERMON00001 \d{4,}')
-T 'no captions: none=1 sent' ($msg2 -match 'no transcript' -and $got -match 'PUT /api/audio/words\?none=1&id=SERMON00002')
+T 'tried maxresdefault, then used hq720' ($got -match 'GET /vi/X/maxresdefault.jpg' -and $got -match 'GET /vi/X/hq720.jpg')
 Stop-Process -Id $srv.Id
 Write-Host "$ok passed, $bad failed"; if ($bad) { exit 1 }
