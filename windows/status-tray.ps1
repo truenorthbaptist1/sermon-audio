@@ -5,7 +5,7 @@
 # YouTube Manager. Started automatically when you sign in; the main program (sermon-audio.ps1) installs and
 # updates this file by itself. "Hide until tomorrow" in its menu takes it away for the day.
 #
-# TrayVersion 1.1.0
+# TrayVersion 1.2.0
 
 $ErrorActionPreference = 'Continue'
 Add-Type -AssemblyName System.Windows.Forms
@@ -148,21 +148,59 @@ $form.Controls.Add($log)
 
 function Button([string]$text, [int]$x, [scriptblock]$click) {
   $b = New-Object System.Windows.Forms.Button
-  $b.Text = $text; $b.Location = "$x,430"; $b.Size = '134,34'
+  $b.Text = $text; $b.Location = "$x,430"; $b.Size = '110,34'
   $b.Add_Click($click)
   $form.Controls.Add($b)
   return $b
 }
 $runBtn = Button 'Run now' 16 { Run-Now }
-[void](Button 'Open full log' 160 { Start-Process notepad.exe $LogFile })
-[void](Button 'Manager page' 304 { Start-Process $Manager })
-[void](Button 'Close' 454 { $form.Hide() })
+$stopBtn = Button 'Stop this run' 132 { Stop-Run }
+[void](Button 'Open full log' 248 { Start-Process notepad.exe $LogFile })
+[void](Button 'Manager page' 364 { Start-Process $Manager })
+[void](Button 'Close' 480 { $form.Hide() })
 $form.Add_FormClosing({ param($s, $e) if ($e.CloseReason -eq 'UserClosing') { $e.Cancel = $true; $form.Hide() } })
 
 function Run-Now {
   if (Is-Running) { [System.Windows.Forms.MessageBox]::Show('It is already working. It will pick up everything waiting before it stops.', 'Sermon audio') | Out-Null; return }
   try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop; $tray.ShowBalloonTip(3000, 'Sermon audio', 'Starting now.', 'Info') }
   catch { [System.Windows.Forms.MessageBox]::Show('Could not start it: ' + $_.Exception.Message, 'Sermon audio') | Out-Null }
+}
+
+# Stop button (1.2.0): ends all three parts and the programs they started (ffmpeg, yt-dlp), then tells the
+# manager, which hands any half-made sermon, reel or post straight back so the next run starts it again.
+function Stop-Run {
+  if (-not (Is-Running)) { return }
+  $ok = [System.Windows.Forms.MessageBox]::Show('Stop what it is doing now? Anything half-made goes back on the list for the next run.', 'Sermon audio', 'YesNo', 'Question')
+  if ($ok -ne 'Yes') { return }
+  $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match 'sermon-audio\.ps1' })
+  $ids = @($procs | ForEach-Object { [int]$_.ProcessId })
+  $kids = @(Get-CimInstance Win32_Process | Where-Object { $ids -contains [int]$_.ParentProcessId })
+  foreach ($p in $ids) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+  foreach ($k in $kids) { Stop-Process -Id ([int]$k.ProcessId) -Force -ErrorAction SilentlyContinue }
+  $now = Get-Date -Format o
+  foreach ($f in @('status.json', 'status-reels.json', 'status-posts.json')) {
+    $path = Join-Path $Dir $f
+    try {
+      $x = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($x.state -eq 'running') {
+        $x.state = 'stopped'; $x.current = $null
+        $x | Add-Member -NotePropertyName finishedAt -NotePropertyValue $now -Force
+        $x | Add-Member -NotePropertyName summary -NotePropertyValue 'stopped from the status icon' -Force
+        [IO.File]::WriteAllText($path, ($x | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+      }
+    } catch {}
+  }
+  $msg = 'Stopped.'
+  try {
+    $cfg = Get-Content (Join-Path $Dir 'config.json') -Raw | ConvertFrom-Json
+    $sec = $cfg.code | ConvertTo-SecureString
+    $code = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+    $r = Invoke-RestMethod -Method Post -Uri ($cfg.server.TrimEnd('/') + '/api/pc/release') -Headers @{ Authorization = "Bearer $code" } -ContentType 'application/json' -Body '{}' -TimeoutSec 30
+    if ($r.released) { $msg = "Stopped. $($r.released) half-made item(s) went back on the list." }
+  } catch { $msg = 'Stopped. (The manager could not be told; half-made items come back on their own within 30 minutes.)' }
+  try { [IO.File]::AppendAllText($LogFile, ('{0}  Stopped from the status icon. {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg) + "`r`n", (New-Object Text.UTF8Encoding($false))) } catch {}
+  $tray.ShowBalloonTip(4000, 'Sermon audio', $msg, 'Info')
+  Refresh-Window
 }
 
 function Refresh-Window {
@@ -182,6 +220,7 @@ function Refresh-Window {
   if ($lp) { $lines += "Last problem ($(When $lp.lastProblemAt)): $($lp.lastProblem)" }
   $info.Text = $lines -join "`r`n"
   $runBtn.Enabled = $sum.kind -ne 'working'
+  $stopBtn.Enabled = $sum.kind -eq 'working'
   try {
     $tail = Get-Content $LogFile -Tail 40 -Encoding UTF8 -ErrorAction Stop
     $text = ($tail | ForEach-Object { $_ }) -join "`r`n"
@@ -199,6 +238,7 @@ $tray.Visible = $true
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 [void]$menu.Items.Add('Show status', $null, { Show-Window })
 [void]$menu.Items.Add('Run now', $null, { Run-Now })
+[void]$menu.Items.Add('Stop this run', $null, { Stop-Run })
 [void]$menu.Items.Add('Open full log', $null, { Start-Process notepad.exe $LogFile })
 [void]$menu.Items.Add('Manager page', $null, { Start-Process $Manager })
 [void]$menu.Items.Add('-')

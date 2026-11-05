@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.5.1'
+$Version = '1.5.2'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -77,7 +77,10 @@ if ($Part -eq 'audio' -and (Test-Path $LogFile) -and (Get-Item $LogFile).Length 
 $MainMutex = 'Local\TNBCSermonAudio'
 $mutexName = if ($Part -eq 'audio') { $MainMutex } else { "$MainMutex-$Part" }
 $mutex = New-Object System.Threading.Mutex($false, $mutexName)
-if (-not $mutex.WaitOne(0)) { if ($Show) { Write-Host 'Already running.' }; exit 0 }
+# a part stopped from the status icon leaves its mutex "abandoned": taking it over is fine
+$got = $false
+try { $got = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+if (-not $got) { if ($Show) { Write-Host 'Already running.' }; exit 0 }
 function Main-Running {
   $m = $null
   if ([System.Threading.Mutex]::TryOpenExisting($MainMutex, [ref]$m)) { $m.Dispose(); return $true }
