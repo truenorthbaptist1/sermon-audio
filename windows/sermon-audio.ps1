@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.6.0'
+$Version = '1.7.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -308,11 +308,12 @@ if ($limit -lt 1) { $limit = 10 }
 
 # ---------- Instagram reels and posts (made by the two helpers, side by side with the audio) ----------
 $FontDir = Join-Path $Dir 'reels-fonts'
-function Reel-Captions($job, [string]$work) {
-  # YouTube's captions with a time for every word (json3), English, automatic ones if nobody typed any
+# YouTube's captions with a time for every word (json3), English, automatic ones if nobody typed any.
+# Returns @{ text = "ms<TAB>word" lines; count }. Used for reels and (1.7.0) the sermon transcripts.
+function Caption-Words([string]$id, [string]$work) {
   $cap = Run-Tool 'yt-dlp.exe' @('--skip-download', '--write-subs', '--write-auto-subs', '--sub-langs', 'en-orig,en,en-US,en-GB',
     '--sub-format', 'json3', '--no-playlist', '--retries', '10', '--socket-timeout', '30',
-    '-o', (Join-Path $work 'cap.%(ext)s'), ('https://www.youtube.com/watch?v=' + $job.id))
+    '-o', (Join-Path $work 'cap.%(ext)s'), ('https://www.youtube.com/watch?v=' + $id))
   $files = @(Get-ChildItem -Path $work -Filter 'cap*.json3')
   if (-not $files.Count) {
     if ($cap.code -ne 0) { throw ('Getting the captions failed: ' + (Last-Line $cap.err)) }
@@ -339,7 +340,25 @@ function Reel-Captions($job, [string]$work) {
     }
   }
   if ($count -lt 200) { throw "The captions have only $count words." }
-  $bytes = [Text.Encoding]::UTF8.GetBytes($sb.ToString())
+  return @{ text = $sb.ToString(); count = $count }
+}
+
+# Sends a sermon's transcript words to the manager (1.7.0); none=1 when YouTube has none, so it isn't asked again
+function Send-Words([string]$id, [string]$work) {
+  try { $w = Caption-Words $id $work }
+  catch {
+    Invoke-RestMethod -Method Put -Uri ($Server + '/api/audio/words?none=1&id=' + $id) -Headers @{ Authorization = "Bearer $Code" } -Body '' -TimeoutSec 60 -UseBasicParsing | Out-Null
+    return "no transcript ($($_.Exception.Message))"
+  }
+  Invoke-RestMethod -Method Put -Uri ($Server + '/api/audio/words?id=' + $id) -Headers @{ Authorization = "Bearer $Code" } `
+    -ContentType 'text/plain; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($w.text)) -TimeoutSec 300 -UseBasicParsing | Out-Null
+  return "transcript sent ($($w.count) words)"
+}
+
+function Reel-Captions($job, [string]$work) {
+  $w = Caption-Words $job.id $work
+  $count = $w.count
+  $bytes = [Text.Encoding]::UTF8.GetBytes($w.text)
   $res = Invoke-RestMethod -Method Put -Uri ($Server + '/api/reels/captions?id=' + $job.id) -Headers @{ Authorization = "Bearer $Code" } `
     -ContentType 'text/plain; charset=utf-8' -Body $bytes -TimeoutSec 600 -UseBasicParsing
   Log "  Captions sent ($count words). Moments picked: $($res.clips)."
@@ -521,6 +540,16 @@ for ($n = 0; $n -lt $limit; $n++) {
   $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-audio-' + $job.id)
   $stage = 'starting'
   $stopAfter = $false
+  if ($job.type -eq 'words') {
+    # 1.7.0: a transcript for a sermon whose audio was made before (a few seconds; no download)
+    try {
+      if (Test-Path $work) { Remove-Item $work -Recurse -Force }
+      New-Item -ItemType Directory -Path $work | Out-Null
+      Log "Transcript for: $($job.title): $(Send-Words $job.id $work)"
+    } catch { Log "  Transcript problem: $($_.Exception.Message)" }
+    finally { if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue } }
+    continue
+  }
   try {
     if (Test-Path $work) { Remove-Item $work -Recurse -Force }
     New-Item -ItemType Directory -Path $work | Out-Null
@@ -626,6 +655,7 @@ for ($n = 0; $n -lt $limit; $n++) {
     $mins = [Math]::Round(($end - $start) / 60)
     Log "  Done: $mins min, $mb MB. Kept $(Clock $start) to $(Clock $end) of the video ($how)."
     $made++
+    if ($job.words) { try { Log "  $(Send-Words $job.id $work)" } catch { Log "  Transcript problem: $($_.Exception.Message)" } }
   } catch {
     $msg = if ($stage -eq 'upload') { ApiError $_ } else { $_.Exception.Message }
     Log "  Problem ($stage): $msg"
