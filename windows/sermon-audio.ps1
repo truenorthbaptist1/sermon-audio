@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.5.2'
+$Version = '1.6.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -419,6 +419,20 @@ function Reel-Render($job, [string]$work) {
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-profile:v', 'high', '-level', '4.1',
     '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', 'reel.mp4')) $work
   if ($enc.code -ne 0 -or -not (Test-Path $out) -or (Get-Item $out).Length -lt 50000) { throw ('Making the video failed: ' + (Last-Line $enc.err)) }
+
+  # 1.6.0: the cover picture for the Instagram grid (a still of the preacher with the reel's title); sent before
+  # the video. A cover problem never stops the reel: Instagram then uses the first frame as before.
+  if ($job.cover) {
+    try {
+      [IO.File]::WriteAllText((Join-Path $work 'cover.ass'), [string]$job.cover.ass, (New-Object Text.UTF8Encoding($false)))
+      $cargs = [string[]]@($job.cover.args | ForEach-Object { if ($_ -eq 'SRC') { $src.Name } else { [string]$_ } })
+      $cv = Run-Tool 'ffmpeg.exe' $cargs $work
+      $cfile = Join-Path $work 'cover.jpg'
+      if ($cv.code -ne 0 -or -not (Test-Path $cfile)) { throw ('ffmpeg: ' + (Last-Line $cv.err)) }
+      Invoke-WebRequest -Method Put -Uri ($Server + '/api/reels/cover?id=' + $job.id + '&n=' + $job.n) -InFile $cfile -ContentType 'image/jpeg' `
+        -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 300 -UseBasicParsing | Out-Null
+    } catch { Log ('  Cover picture skipped: ' + $_.Exception.Message) }
+  }
 
   for ($try = 1; ; $try++) {
     try {

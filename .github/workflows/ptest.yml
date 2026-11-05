@@ -1,0 +1,9 @@
+name: cover test
+on: { push: { branches: [tmp-words] } }
+jobs:
+  win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ptest\run.ps1
