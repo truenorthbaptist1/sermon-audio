@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.5.0'
+$Version = '1.5.1'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -133,7 +133,7 @@ function Run-Tool([string]$exe, [string[]]$argList, [string]$cwd = '') {
 }
 
 function Api([string]$path, $body) {
-  $json = if ($null -eq $body) { '{}' } else { $body | ConvertTo-Json -Compress }
+  $json = if ($null -eq $body) { '{}' } else { $body | ConvertTo-Json -Compress -Depth 6 }
   $bytes = [Text.Encoding]::UTF8.GetBytes($json)
   $res = Invoke-WebRequest -Method Post -Uri ($Server + $path) -Headers @{ Authorization = "Bearer $Code" } `
     -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec 600 -UseBasicParsing
@@ -364,6 +364,8 @@ function Post-Render($job, [string]$work) {
   Prepare-Art $job $work
   if ($job.bg) { Invoke-WebRequest -Uri $job.bg -OutFile (Join-Path $work 'bg.mp4') -TimeoutSec 600 -UseBasicParsing }
   if ($job.music) { Invoke-WebRequest -Uri $job.music -OutFile (Join-Path $work 'music.m4a') -TimeoutSec 300 -UseBasicParsing }
+  $assets = @()
+  $v2 = [bool]$job.v2   # 1.5.1: upload every file, then tell the manager once (a quick post can outrun its storage)
   foreach ($o in $job.outputs) {
     [IO.File]::WriteAllText((Join-Path $work ('s' + $o.i + '.ass')), [string]$o.ass, (New-Object Text.UTF8Encoding($false)))
     $enc = Run-Tool 'ffmpeg.exe' ([string[]]$o.args) $work
@@ -372,8 +374,10 @@ function Post-Render($job, [string]$work) {
     $type = if ($o.ext -eq 'jpg') { 'image/jpeg' } else { 'video/mp4' }
     for ($try = 1; ; $try++) {
       try {
-        Invoke-WebRequest -Method Put -Uri ($Server + '/api/posts/upload?id=' + [uri]::EscapeDataString($job.id) + '&i=' + $o.i) -InFile $file -ContentType $type `
-          -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 1800 -UseBasicParsing | Out-Null
+        $uri = $Server + '/api/posts/upload?id=' + [uri]::EscapeDataString($job.id) + '&i=' + $o.i + $(if ($v2) { '&v=2' } else { '' })
+        $res = Invoke-WebRequest -Method Put -Uri $uri -InFile $file -ContentType $type `
+          -Headers @{ Authorization = "Bearer $Code" } -TimeoutSec 1800 -UseBasicParsing
+        if ($v2) { $assets += ([Text.Encoding]::UTF8.GetString($res.RawContentStream.ToArray()) | ConvertFrom-Json).asset }
         break
       } catch {
         $httpStatus = 0; try { $httpStatus = [int]$_.Exception.Response.StatusCode } catch {}
@@ -382,6 +386,7 @@ function Post-Render($job, [string]$work) {
       }
     }
   }
+  if ($v2) { Api '/api/posts/done' @{ id = $job.id; job = $job.job; assets = $assets } | Out-Null }
   Log "  Made $($job.outputs.Count) file(s) for $($job.title)."
 }
 
