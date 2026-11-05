@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.7.0'
+$Version = '1.8.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -444,6 +444,16 @@ function Reel-Render($job, [string]$work) {
   if ($job.cover) {
     try {
       [IO.File]::WriteAllText((Join-Path $work 'cover.ass'), [string]$job.cover.ass, (New-Object Text.UTF8Encoding($false)))
+      # 1.8.0: pictures the cover needs (the series thumbnail), each with fallbacks
+      foreach ($in in @($job.cover.inputs)) {
+        if (-not $in) { continue }
+        $got = $false
+        foreach ($u in @($in.urls)) {
+          try { Invoke-WebRequest -Uri $u -OutFile (Join-Path $work $in.name) -TimeoutSec 60 -UseBasicParsing; $got = (Get-Item (Join-Path $work $in.name)).Length -gt 5000 } catch {}
+          if ($got) { break }
+        }
+        if (-not $got) { throw "couldn't download $($in.name)" }
+      }
       $cargs = [string[]]@($job.cover.args | ForEach-Object { if ($_ -eq 'SRC') { $src.Name } else { [string]$_ } })
       $cv = Run-Tool 'ffmpeg.exe' $cargs $work
       $cfile = Join-Path $work 'cover.jpg'
