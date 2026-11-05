@@ -21,7 +21,9 @@ $script:logged = @()
 function Log([string]$m) { Write-Host "LOG $m"; $script:logged += $m }
 $Server = 'http://localhost:8787'; $Code = 'tnbc-x'
 $job = Get-Content ptest\coverjob.json -Raw | ConvertFrom-Json
-$srv = Start-Process node -ArgumentList "$PWD\ptest\fake.js" -WorkingDirectory "$PWD" -PassThru -WindowStyle Hidden; Start-Sleep 2
+$srv = Start-Process node -ArgumentList "`"$PWD\ptest\fake.js`"" -WorkingDirectory "$PWD" -PassThru -WindowStyle Hidden -RedirectStandardError "$PWD\node-err.txt"
+for ($i = 0; $i -lt 30; $i++) { try { Invoke-WebRequest http://localhost:8787/ping -UseBasicParsing -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep 1 } }
+Write-Host "server up after $i s"; if (Test-Path node-err.txt) { Get-Content node-err.txt }
 Write-Host "5 cover block"
 $block = [regex]::Match($script, '(?s)  if \(\$job\.cover\) \{.*?\n  \}\r?\n').Value
 Invoke-Expression $block
