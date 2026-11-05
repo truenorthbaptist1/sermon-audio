@@ -1,0 +1,37 @@
+{
+ "type": "fbvideo",
+ "id": "VIDEO000001",
+ "title": "\"Ephesians.\" -Study#38- \"Be Filled with the Spirit.\" (Ephesians 5:18-21)",
+ "start": 0,
+ "end": 70,
+ "duration": 70,
+ "endcard": "[Script Info]\nScriptType: v4.00+\nPlayResX: 1280\nPlayResY: 720\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: S,Montserrat SemiBold,40,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,40,40,0,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 4,0:00:00.30,0:00:06.00,S,,0,0,0,,{\\an5\\pos(640,385)\\fnMontserrat ExtraBold\\fs80\\c&H00FFFFFF&\\bord0\\shad0\\be1\\fad(500,300)}Listen to more!\nDialogue: 4,0:00:00.60,0:00:06.00,S,,0,0,0,,{\\an5\\pos(640,462)\\fs40\\c&H00F2E6DC&\\bord0\\shad0\\be1\\fad(500,300)}on our website\nDialogue: 4,0:00:00.90,0:00:06.00,S,,0,0,0,,{\\an5\\pos(640,566)\\p1\\1c&H00E6C4A9&\\bord0\\shad0\\be1\\fad(400,300)}m 46 0 l 514 0 b 537 0 560 23 560 46 b 560 69 537 92 514 92 l 46 92 b 23 92 0 69 0 46 b 0 23 23 0 46 0{\\p0}\nDialogue: 5,0:00:00.90,0:00:06.00,S,,0,0,0,,{\\an5\\pos(640,568)\\fnMontserrat ExtraBold\\fs38\\c&H003F1C02&\\bord0\\shad0\\be1\\fsp2\\fad(400,300)}TRUENORTHBAPTIST.COM\nDialogue: 4,0:00:01.20,0:00:06.00,S,,0,0,0,,{\\an5\\pos(640,660)\\fnCinzel\\b1\\fs30\\c&H00E6C4A9&\\bord0\\shad0\\be1\\fsp4\\fad(500,300)}TRUE NORTH BAPTIST CHURCH\n",
+ "logo": "http://localhost:8787/logo.png",
+ "thumbs": [
+  "http://localhost:8787/vi/X/maxresdefault.jpg",
+  "http://localhost:8787/vi/X/hq720.jpg"
+ ],
+ "fonts": [
+  {
+   "name": "Montserrat-ExtraBold.ttf",
+   "url": "http://localhost:8787/fonts/Montserrat-ExtraBold.ttf"
+  },
+  {
+   "name": "Montserrat-SemiBold.ttf",
+   "url": "http://localhost:8787/fonts/Montserrat-SemiBold.ttf"
+  },
+  {
+   "name": "Cinzel-Bold.ttf",
+   "url": "http://localhost:8787/fonts/Cinzel-Bold.ttf"
+  }
+ ],
+ "page": {
+  "id": "PAGE",
+  "token": "ptok",
+  "api": "v25.0",
+  "videoHost": "http://localhost:8787",
+  "graphHost": "http://localhost:8787"
+ },
+ "fbTitle": "\"Ephesians.\" -Study#38- \"Be Filled with the Spirit.\" (Ephesians 5:18-21)",
+ "description": "\"Ephesians.\" -Study#38- \"Be Filled with the Spirit.\" (Ephesians 5:18-21)\n\nBe filled with the Spirit.\n\nScripture: Ephesians 5:18-21\n\nListen to more messages: https://truenorthbaptist.com/listen\n\nWatch on YouTube: https://youtu.be/VIDEO000001\n\nTrue North Baptist Church · An independent, Bible preaching, Baptist church in North Pole, Alaska\n\n#Sermon #Bible #BaptistChurch #NorthPoleAlaska #FairbanksAlaska"
+}

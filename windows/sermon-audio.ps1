@@ -1,4 +1,4 @@
-# True North Baptist Church - Sermon audio maker (runs on the church's home computer)
+﻿# True North Baptist Church - Sermon audio maker (runs on the church's home computer)
 #
 # Every hour while the computer is on (and a few minutes after signing in), Windows runs this script.
 # It asks the YouTube Manager which sermons need audio, and for each one:
@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.8.0'
+$Version = '1.9.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -477,6 +477,112 @@ function Reel-Render($job, [string]$work) {
   Log "  Reel #$($job.n) made: $([Math]::Round([double]$job.duration)) seconds, $([Math]::Round((Get-Item $out).Length / 1MB, 1)) MB."
 }
 
+# 1.9.0: the whole sermon on the church's Facebook Page: the sermon part of the YouTube video, a short
+# "Listen to more!" end card with the website, the series thumbnail as the cover, and the manager's caption.
+function Fb-Form($client, [string]$url, [hashtable]$fields, [byte[]]$chunk) {
+  $form = New-Object System.Net.Http.MultipartFormDataContent
+  foreach ($k in $fields.Keys) { $form.Add((New-Object System.Net.Http.StringContent([string]$fields[$k], [Text.Encoding]::UTF8)), $k) }
+  if ($chunk) {
+    $bc = New-Object System.Net.Http.ByteArrayContent(, $chunk)
+    $bc.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/octet-stream')
+    $form.Add($bc, 'video_file_chunk', 'chunk.mp4')
+  }
+  $resp = $client.PostAsync($url, $form).Result
+  $text = $resp.Content.ReadAsStringAsync().Result
+  $form.Dispose()
+  $j = $null; try { $j = $text | ConvertFrom-Json } catch {}
+  if (-not $resp.IsSuccessStatusCode -or ($j -and $j.error)) {
+    $m = if ($j -and $j.error) { $j.error.message } else { "HTTP $([int]$resp.StatusCode)" }
+    throw "Facebook: $m"
+  }
+  return $j
+}
+
+function FB-Video($job, [string]$work) {
+  Prepare-Art $job $work
+  [IO.File]::WriteAllText((Join-Path $work 'endcard.ass'), [string]$job.endcard, (New-Object Text.UTF8Encoding($false)))
+
+  # the sermon part of the video (or the whole video when the cut isn't known), up to 1080p
+  $dlArgs = @('-f', 'bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b')
+  if ($null -ne $job.start -and $job.end) { $dlArgs += @('--download-sections', ('*' + (Str ([double]$job.start)) + '-' + (Str ([double]$job.end))), '--force-keyframes-at-cuts') }
+  $dlArgs += @('--merge-output-format', 'mp4', '--no-playlist', '--no-progress', '--no-part', '--retries', '20', '--fragment-retries', '20',
+    '--socket-timeout', '30', '-o', (Join-Path $work 'src.%(ext)s'), ('https://www.youtube.com/watch?v=' + $job.id))
+  $dl = Run-Tool 'yt-dlp.exe' $dlArgs
+  $src = Get-ChildItem -Path $work -Filter 'src.*' | Select-Object -First 1
+  if ($dl.code -ne 0 -or -not $src) { throw ('YouTube download failed: ' + (Last-Line $dl.err)) }
+
+  $dur = 0.0
+  $probe = Run-Tool 'ffprobe.exe' @('-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', $src.FullName)
+  [void][double]::TryParse(($probe.out.Trim()), [Globalization.NumberStyles]::Float, $Inv, [ref]$dur)
+  if ($dur -lt 60) { if ($job.duration) { $dur = [double]$job.duration } else { throw "The video is too short ($dur s)." } }
+  $fade = Str ([Math]::Max(0, $dur - 1))
+
+  # the cover: the series thumbnail from YouTube
+  $thumb = Join-Path $work 'thumb.jpg'
+  foreach ($u in @($job.thumbs)) {
+    try { Invoke-WebRequest -Uri $u -OutFile $thumb -TimeoutSec 60 -UseBasicParsing; if ((Get-Item $thumb).Length -gt 5000) { break } } catch {}
+  }
+
+  $filter = "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,fade=t=out:st=${fade}:d=1[m];" +
+    "[0:a]aresample=48000,aformat=channel_layouts=stereo,afade=t=out:st=${fade}:d=1[ma];" +
+    "[2:v]scale=170:-1[lg];[1:v][lg]overlay=(W-w)/2:90,subtitles=endcard.ass:fontsdir=fonts,setsar=1,format=yuv420p[e];" +
+    "[m][ma][e][3:a]concat=n=2:v=1:a=1[v][a]"
+  $enc = Run-Tool 'ffmpeg.exe' @('-hide_banner', '-nostats', '-y', '-i', $src.Name,
+    '-f', 'lavfi', '-t', '6', '-i', 'color=c=0x0b1626:s=1280x720:r=30', '-i', 'logo.png',
+    '-f', 'lavfi', '-t', '6', '-i', 'anullsrc=r=48000:cl=stereo',
+    '-filter_complex', $filter, '-map', '[v]', '-map', '[a]',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-profile:v', 'high', '-level', '4.1',
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', 'fb.mp4') $work
+  $out = Join-Path $work 'fb.mp4'
+  if ($enc.code -ne 0 -or -not (Test-Path $out) -or (Get-Item $out).Length -lt 100000) { throw ('Making the video failed: ' + (Last-Line $enc.err)) }
+  $size = (Get-Item $out).Length
+  Log "  Video made: $([Math]::Round($dur / 60)) minutes, $([Math]::Round($size / 1MB)) MB. Sending to Facebook..."
+
+  # Facebook's resumable upload: start, send the file in pieces, finish with the title and caption
+  Add-Type -AssemblyName System.Net.Http
+  $client = New-Object System.Net.Http.HttpClient
+  $client.Timeout = [TimeSpan]::FromMinutes(30)
+  $videoHost = if ($job.page.videoHost) { [string]$job.page.videoHost } else { 'https://graph-video.facebook.com' }
+  $graphHost = if ($job.page.graphHost) { [string]$job.page.graphHost } else { 'https://graph.facebook.com' }
+  $url = "$videoHost/$($job.page.api)/$($job.page.id)/videos"
+  $tok = [string]$job.page.token
+  try {
+    $st = Fb-Form $client $url @{ access_token = $tok; upload_phase = 'start'; file_size = [string]$size } $null
+    $session = [string]$st.upload_session_id; $videoId = [string]$st.video_id
+    $from = [long]$st.start_offset; $to = [long]$st.end_offset
+    $fs = [IO.File]::OpenRead($out)
+    try {
+      while ($from -lt $to) {
+        $len = [int]($to - $from); $buf = New-Object byte[] $len
+        [void]$fs.Seek($from, 'Begin'); $got = 0
+        while ($got -lt $len) { $r = $fs.Read($buf, $got, $len - $got); if ($r -le 0) { break }; $got += $r }
+        for ($try = 1; ; $try++) {
+          try { $tr = Fb-Form $client $url @{ access_token = $tok; upload_phase = 'transfer'; upload_session_id = $session; start_offset = [string]$from } $buf; break }
+          catch { if ($try -ge 4) { throw }; Start-Sleep -Seconds (20 * $try) }
+        }
+        $from = [long]$tr.start_offset; $to = [long]$tr.end_offset
+      }
+    } finally { $fs.Close() }
+    [void](Fb-Form $client $url @{ access_token = $tok; upload_phase = 'finish'; upload_session_id = $session
+        title = [string]$job.fbTitle; description = [string]$job.description; published = 'true' } $null)
+    # the series thumbnail as the cover (a cover problem never stops the post)
+    if ((Test-Path $thumb) -and (Get-Item $thumb).Length -gt 5000) {
+      try {
+        $form = New-Object System.Net.Http.MultipartFormDataContent
+        $form.Add((New-Object System.Net.Http.StringContent($tok)), 'access_token')
+        $form.Add((New-Object System.Net.Http.StringContent('true')), 'is_preferred')
+        $ic = New-Object System.Net.Http.ByteArrayContent(, [IO.File]::ReadAllBytes($thumb))
+        $ic.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('image/jpeg')
+        $form.Add($ic, 'source', 'thumb.jpg')
+        $tr2 = $client.PostAsync("$graphHost/$($job.page.api)/$videoId/thumbnails", $form).Result
+        if (-not $tr2.IsSuccessStatusCode) { Log ('  Cover picture not set: ' + $tr2.Content.ReadAsStringAsync().Result) }
+      } catch { Log ('  Cover picture not set: ' + $_.Exception.Message) }
+    }
+  } finally { $client.Dispose() }
+  Api '/api/fbvideo/done' @{ id = $job.id; videoId = $videoId } | Out-Null
+  Log "  Posted to Facebook: $($job.title)"
+}
+
 # Makes reels/posts until none are left. $only: 'reels', 'posts' or '' (both, the old way).
 # Sets $script:LastCheck to the manager's clock at the last look, so the helper knows when new work arrived.
 $script:LastCheck = 0
@@ -496,13 +602,14 @@ function Reel-Work([string]$only) {
       if ($job.type -eq 'captions') { Log "Reels: getting captions for $($job.title)"; Reel-Captions $job $work }
       elseif ($job.type -eq 'render') { Log "Reels: making reel #$($job.n) from $($job.title)"; Reel-Render $job $work }
       elseif ($job.type -eq 'post') { Log "Posts: making the $($job.title)"; Post-Render $job $work }
+      elseif ($job.type -eq 'fbvideo') { Log "Facebook: posting the full sermon $($job.title)"; FB-Video $job $work }
       else { break }
     } catch {
       $msg = ApiError $_
       Log "  Reel problem: $msg"
       $body = @{ id = $job.id; error = $msg }
       if ($job.type -eq 'render') { $body.n = $job.n }
-      $failPath = if ($job.type -eq 'post') { '/api/posts/fail' } else { '/api/reels/fail' }
+      $failPath = if ($job.type -eq 'post') { '/api/posts/fail' } elseif ($job.type -eq 'fbvideo') { '/api/fbvideo/fail' } else { '/api/reels/fail' }
       try { Api $failPath $body | Out-Null } catch {}
       if ($msg -match 'download failed|captions failed') { $script:PauseUntil = (Get-Date).AddMinutes(45); break }  # YouTube is probably blocking; try again later
     } finally {

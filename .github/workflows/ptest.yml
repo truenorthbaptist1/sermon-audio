@@ -1,10 +1,13 @@
-name: cover test
+name: fb video test
 on: { push: { branches: [tmp-words] } }
 jobs:
   win:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File ptest\run.ps1
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: frames, path: "*.png" }
