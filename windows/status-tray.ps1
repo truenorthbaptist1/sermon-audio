@@ -5,7 +5,7 @@
 # YouTube Manager. Started automatically when you sign in; the main program (sermon-audio.ps1) installs and
 # updates this file by itself. "Hide until tomorrow" in its menu takes it away for the day.
 #
-# TrayVersion 1.0.0
+# TrayVersion 1.1.0
 
 $ErrorActionPreference = 'Continue'
 Add-Type -AssemblyName System.Windows.Forms
@@ -23,15 +23,40 @@ $trayMutex = New-Object System.Threading.Mutex($false, 'Local\TNBCSermonAudioTra
 if (-not $trayMutex.WaitOne(0)) { exit 0 }
 $myStamp = (Get-Item $Me).LastWriteTime
 
-function Is-Running {
-  # the main program holds this mutex while it runs (open the handle only for a moment)
+function Part-Running([string]$name) {
+  # each part holds its own mutex while it runs (open the handle only for a moment)
   $m = $null
-  if ([System.Threading.Mutex]::TryOpenExisting('Local\TNBCSermonAudio', [ref]$m)) { $m.Dispose(); return $true }
+  if ([System.Threading.Mutex]::TryOpenExisting($name, [ref]$m)) { $m.Dispose(); return $true }
   return $false
+}
+function Is-Running {
+  return (Part-Running 'Local\TNBCSermonAudio') -or (Part-Running 'Local\TNBCSermonAudio-reels') -or (Part-Running 'Local\TNBCSermonAudio-posts')
 }
 
 function Read-Status {
   try { return (Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
+}
+# the reels and posts helpers (program 1.5.0+) each keep their own status file
+function Read-Helper([string]$part) {
+  try { return (Get-Content (Join-Path $Dir "status-$part.json") -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
+}
+function Now-Lines {
+  $out = @()
+  $s = Read-Status
+  if ((Part-Running 'Local\TNBCSermonAudio') -and $s -and $s.state -eq 'running' -and $s.current) { $out += 'Audio: ' + $s.current }
+  foreach ($p in @('reels', 'posts')) {
+    $h = Read-Helper $p
+    if ((Part-Running "Local\TNBCSermonAudio-$p") -and $h -and $h.current) { $out += $(if ($p -eq 'reels') { 'Reels: ' } else { 'Posts: ' }) + $h.current }
+  }
+  return $out
+}
+# the newest problem from any part
+function Last-Problem {
+  $best = $null
+  foreach ($x in @((Read-Status), (Read-Helper 'reels'), (Read-Helper 'posts'))) {
+    if ($x -and $x.lastProblem -and $x.lastProblemAt -and (-not $best -or [datetime]::Parse($x.lastProblemAt) -gt [datetime]::Parse($best.lastProblemAt))) { $best = $x }
+  }
+  return $best
 }
 
 function When([string]$iso) {
@@ -69,9 +94,11 @@ $Icons = @{ working = (Dot $Blue); ok = (Dot $Green); problem = (Dot $Orange); u
 function Summary {
   $s = Read-Status
   $running = Is-Running
-  $problemToday = $s -and $s.lastProblem -and $s.lastProblemAt -and ([datetime]::Parse($s.lastProblemAt) -gt (Get-Date).AddHours(-3))
+  $lp = Last-Problem
+  $problemToday = $lp -and ([datetime]::Parse($lp.lastProblemAt) -gt (Get-Date).AddHours(-3))
   if ($running) {
-    $now = if ($s -and $s.state -eq 'running' -and $s.current) { $s.current } else { 'Checking for work' }
+    $nl = @(Now-Lines)
+    $now = if ($nl.Count) { $nl -join "`r`n" } else { 'Checking for work' }
     return @{ kind = 'working'; headline = 'Working'; detail = $now }
   }
   if (-not $s) { return @{ kind = 'unknown'; headline = 'Waiting for its first run'; detail = 'It runs a few minutes after you sign in, then every hour.' } }
@@ -99,21 +126,21 @@ $head.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 14)
 $form.Controls.Add($head)
 
 $detail = New-Object System.Windows.Forms.Label
-$detail.Location = '16,48'; $detail.Size = '570,44'
+$detail.Location = '16,48'; $detail.Size = '570,64'
 $form.Controls.Add($detail)
 
 $info = New-Object System.Windows.Forms.Label
-$info.Location = '16,94'; $info.Size = '570,64'
+$info.Location = '16,114'; $info.Size = '570,64'
 $info.ForeColor = [System.Drawing.Color]::FromArgb(90, 90, 90)
 $form.Controls.Add($info)
 
 $logLabel = New-Object System.Windows.Forms.Label
-$logLabel.Location = '16,162'; $logLabel.Size = '300,20'; $logLabel.Text = 'Recent activity'
+$logLabel.Location = '16,182'; $logLabel.Size = '300,20'; $logLabel.Text = 'Recent activity'
 $logLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
 $form.Controls.Add($logLabel)
 
 $log = New-Object System.Windows.Forms.TextBox
-$log.Location = '16,184'; $log.Size = '572,232'
+$log.Location = '16,204'; $log.Size = '572,212'
 $log.Multiline = $true; $log.ReadOnly = $true; $log.ScrollBars = 'Vertical'; $log.WordWrap = $false
 $log.Font = New-Object System.Drawing.Font('Consolas', 9)
 $log.BackColor = [System.Drawing.Color]::White
@@ -148,8 +175,11 @@ function Refresh-Window {
   $v = if ($s -and $s.version) { "Version $($s.version)" } else { 'Version unknown' }
   $nc = Next-Check
   $lines += $v + $(if ($nc) { " - runs every hour, next at $nc" } else { ' - runs every hour while the computer is on' })
-  if ($s -and $s.state -eq 'running') { $lines += "This run (started $(When $s.startedAt)): $($s.audio) sermon(s), $($s.reels) reel(s) or post(s) so far" }
-  if ($s -and $s.lastProblem) { $lines += "Last problem ($(When $s.lastProblemAt)): $($s.lastProblem)" }
+  $hr = Read-Helper 'reels'; $hp = Read-Helper 'posts'
+  $made = [int]$(if ($s) { $s.reels } else { 0 }) + [int]$(if ($hr -and $s -and $hr.startedAt -ge $s.startedAt) { $hr.reels } else { 0 }) + [int]$(if ($hp -and $s -and $hp.startedAt -ge $s.startedAt) { $hp.reels } else { 0 })
+  if ($s -and $s.state -eq 'running') { $lines += "This run (started $(When $s.startedAt)): $($s.audio) sermon(s), $made reel(s) or post(s) so far" }
+  $lp = Last-Problem
+  if ($lp) { $lines += "Last problem ($(When $lp.lastProblemAt)): $($lp.lastProblem)" }
   $info.Text = $lines -join "`r`n"
   $runBtn.Enabled = $sum.kind -ne 'working'
   try {
@@ -195,7 +225,7 @@ function Tick {
   $sum = Summary
   $tray.Icon = $Icons[$sum.kind]
   $tip = 'Sermon audio: ' + $sum.headline
-  if ($sum.kind -eq 'working' -and $sum.detail) { $tip += ' - ' + $sum.detail }
+  if ($sum.kind -eq 'working' -and $sum.detail) { $tip += ' - ' + ($sum.detail -replace "`r`n", ' / ') }
   if ($tip.Length -gt 63) { $tip = $tip.Substring(0, 60) + '...' }
   $tray.Text = $tip
   if ($script:lastKind -eq 'working' -and $sum.kind -eq 'problem') { $tray.ShowBalloonTip(5000, 'Sermon audio', $sum.detail, 'Warning') }

@@ -12,30 +12,40 @@
 # Nothing is kept on this computer except the program, its tools, two fonts and a short log (log.txt).
 #
 # Run it by hand to test:  right-click "Run now.cmd"  (or: powershell -ExecutionPolicy Bypass -File sermon-audio.ps1 -Show)
+#
+# Three jobs run side by side (1.5.0): this copy makes the sermon audio and starts two helpers, one for the
+# sermon reels and one for the Scripture & question posts (the same file with -Part reels / -Part posts).
+# While the audio part is busy, the helpers check every minute for new work, so a reel asked for in the
+# middle of a long audio run is made within a couple of minutes.
 
-param([switch]$Show)
+param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.4.0'
+$Version = '1.5.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Inv = [Globalization.CultureInfo]::InvariantCulture
 
-$Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Me = $MyInvocation.MyCommand.Path
+$Dir = Split-Path -Parent $Me
 $Tools = Join-Path $Dir 'tools'
 $LogFile = Join-Path $Dir 'log.txt'
 $env:PATH = "$Tools;$env:PATH"   # yt-dlp finds deno (needed for YouTube) here too
 
 function Log([string]$m) {
   $line = '{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m
-  Add-Content -Path $LogFile -Value $line -Encoding UTF8
+  # three parts share the log: if another one is writing this instant, wait a moment and try again
+  for ($i = 0; $i -lt 20; $i++) {
+    try { [IO.File]::AppendAllText($LogFile, $line + "`r`n", (New-Object Text.UTF8Encoding($false))); break } catch { Start-Sleep -Milliseconds 150 }
+  }
   if ($Show) { Write-Host $line }
   Status-FromLog $m
 }
 
 # ---------- status for the icon by the clock (status-tray.ps1 reads status.json) ----------
-$StatusFile = Join-Path $Dir 'status.json'
-$St = @{ version = $Version; state = 'running'; startedAt = (Get-Date -Format o); current = 'Starting'; audio = 0; reels = 0 }
+# the audio part writes status.json; the helpers write status-reels.json and status-posts.json
+$StatusFile = if ($Part -eq 'audio') { Join-Path $Dir 'status.json' } else { Join-Path $Dir "status-$Part.json" }
+$St = @{ version = $Version; part = $Part; state = 'running'; startedAt = (Get-Date -Format o); current = 'Starting'; audio = 0; reels = 0 }
 try { $old = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json; if ($old.lastProblem) { $St.lastProblem = $old.lastProblem; $St.lastProblemAt = $old.lastProblemAt } } catch {}
 function Save-Status {
   try {
@@ -57,15 +67,22 @@ function Status-FromLog([string]$m) {
   Save-Status
 }
 
-# Keep the log short
-if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt 1MB) {
+# Keep the log short (the audio part only, before the helpers start)
+if ($Part -eq 'audio' -and (Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt 1MB) {
   $keep = Get-Content $LogFile -Tail 3000
   Set-Content -Path $LogFile -Value $keep -Encoding UTF8
 }
 
-# Only one copy at a time
-$mutex = New-Object System.Threading.Mutex($false, 'Local\TNBCSermonAudio')
+# Only one copy of each part at a time
+$MainMutex = 'Local\TNBCSermonAudio'
+$mutexName = if ($Part -eq 'audio') { $MainMutex } else { "$MainMutex-$Part" }
+$mutex = New-Object System.Threading.Mutex($false, $mutexName)
 if (-not $mutex.WaitOne(0)) { if ($Show) { Write-Host 'Already running.' }; exit 0 }
+function Main-Running {
+  $m = $null
+  if ([System.Threading.Mutex]::TryOpenExisting($MainMutex, [ref]$m)) { $m.Dispose(); return $true }
+  return $false
+}
 Save-Status
 
 # Stay out of the way of whatever else the computer is doing
@@ -243,6 +260,7 @@ function Start-Tray {
   } catch {}
 }
 
+if ($Part -eq 'audio') {
 # ---------- keep this program up to date (checks once a day; new version runs next time) ----------
 $selfStamp = Join-Path $Dir 'last-self-update.txt'
 if (-not (Test-Path $selfStamp) -or ((Get-Date) - (Get-Item $selfStamp).LastWriteTime).TotalHours -ge 20) {
@@ -283,8 +301,9 @@ try {
 }
 $limit = [int]$hello.perSession
 if ($limit -lt 1) { $limit = 10 }
+}
 
-# ---------- Instagram reels (done first: they're quick and someone is waiting to review them) ----------
+# ---------- Instagram reels and posts (made by the two helpers, side by side with the audio) ----------
 $FontDir = Join-Path $Dir 'reels-fonts'
 function Reel-Captions($job, [string]$work) {
   # YouTube's captions with a time for every word (json3), English, automatic ones if nobody typed any
@@ -407,30 +426,67 @@ function Reel-Render($job, [string]$work) {
   Log "  Reel #$($job.n) made: $([Math]::Round([double]$job.duration)) seconds, $([Math]::Round((Get-Item $out).Length / 1MB, 1)) MB."
 }
 
-for ($n = 0; $n -lt 8; $n++) {
-  try { $r = Api '/api/reels/next' @{ version = $Version } } catch { if ($Show) { Log ('Reels: ' + (ApiError $_)) }; break }
-  $job = $r.job
-  if (-not $job) { break }
-  $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-reel-' + ($job.id -replace '[^\w-]', ''))
-  try {
-    if (Test-Path $work) { Remove-Item $work -Recurse -Force }
-    New-Item -ItemType Directory -Path $work | Out-Null
-    if ($job.type -eq 'captions') { Log "Reels: getting captions for $($job.title)"; Reel-Captions $job $work }
-    elseif ($job.type -eq 'render') { Log "Reels: making reel #$($job.n) from $($job.title)"; Reel-Render $job $work }
-    elseif ($job.type -eq 'post') { Log "Posts: making the $($job.title)"; Post-Render $job $work }
-    else { break }
-  } catch {
-    $msg = ApiError $_
-    Log "  Reel problem: $msg"
-    $body = @{ id = $job.id; error = $msg }
-    if ($job.type -eq 'render') { $body.n = $job.n }
-    $failPath = if ($job.type -eq 'post') { '/api/posts/fail' } else { '/api/reels/fail' }
-    try { Api $failPath $body | Out-Null } catch {}
-    if ($msg -match 'download failed|captions failed') { break }  # YouTube is probably blocking; try next hour
-  } finally {
-    if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+# Makes reels/posts until none are left. $only: 'reels', 'posts' or '' (both, the old way).
+# Sets $script:LastCheck to the manager's clock at the last look, so the helper knows when new work arrived.
+$script:LastCheck = 0
+$script:PauseUntil = Get-Date
+function Reel-Work([string]$only) {
+  if ($Part -ne 'audio') { $St.current = 'Checking for ' + $Part; Save-Status }
+  $q = if ($only) { '?only=' + $only } else { '' }
+  for ($n = 0; $n -lt 30; $n++) {
+    try { $r = Api ('/api/reels/next' + $q) @{ version = $Version } } catch { if ($Show) { Log ('Reels: ' + (ApiError $_)) }; break }
+    if ($r.now) { $script:LastCheck = [double]$r.now }
+    $job = $r.job
+    if (-not $job) { break }
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-reel-' + ($job.id -replace '[^\w-]', ''))
+    try {
+      if (Test-Path $work) { Remove-Item $work -Recurse -Force }
+      New-Item -ItemType Directory -Path $work | Out-Null
+      if ($job.type -eq 'captions') { Log "Reels: getting captions for $($job.title)"; Reel-Captions $job $work }
+      elseif ($job.type -eq 'render') { Log "Reels: making reel #$($job.n) from $($job.title)"; Reel-Render $job $work }
+      elseif ($job.type -eq 'post') { Log "Posts: making the $($job.title)"; Post-Render $job $work }
+      else { break }
+    } catch {
+      $msg = ApiError $_
+      Log "  Reel problem: $msg"
+      $body = @{ id = $job.id; error = $msg }
+      if ($job.type -eq 'render') { $body.n = $job.n }
+      $failPath = if ($job.type -eq 'post') { '/api/posts/fail' } else { '/api/reels/fail' }
+      try { Api $failPath $body | Out-Null } catch {}
+      if ($msg -match 'download failed|captions failed') { $script:PauseUntil = (Get-Date).AddMinutes(45); break }  # YouTube is probably blocking; try again later
+    } finally {
+      if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+    }
   }
+  if ($Part -ne 'audio') { $St.current = 'Watching for new ' + $Part; Save-Status }
 }
+
+# ---------- the reels and posts helpers ----------
+if ($Part -ne 'audio') {
+  Reel-Work $Part
+  # keep looking (one small check a minute) while the audio part is still working, at most 12 hours
+  $until = (Get-Date).AddHours(12)
+  while ((Get-Date) -lt $until -and (Main-Running)) {
+    Start-Sleep -Seconds 60
+    if ((Get-Date) -lt $script:PauseUntil) { continue }
+    try { $pk = Api ('/api/reels/peek?part=' + $Part) @{} } catch { continue }
+    if ([double]$pk.poke -gt $script:LastCheck) { Reel-Work $Part }
+  }
+  $St.summary = if ($St.reels) { "made $($St.reels) $Part" } else { 'nothing waiting' }
+  $St.state = 'done'; $St.current = $null; $St.finishedAt = (Get-Date -Format o)
+  Save-Status
+  $mutex.ReleaseMutex()
+  exit 0
+}
+
+# ---------- audio part: start the two helpers, so reels and posts are made at the same time as the audio ----------
+$helpersOk = $true
+foreach ($h in @('reels', 'posts')) {
+  try {
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Me`" -Part $h")
+  } catch { $helpersOk = $false; Log "Couldn't start the $h helper ($($_.Exception.Message)); making them here first." }
+}
+if (-not $helpersOk) { Reel-Work '' }
 
 # ---------- make audio ----------
 $made = 0
