@@ -15,7 +15,7 @@
 
 param([switch]$Show)
 
-$Version = '1.3.2'
+$Version = '1.4.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -30,6 +30,31 @@ function Log([string]$m) {
   $line = '{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m
   Add-Content -Path $LogFile -Value $line -Encoding UTF8
   if ($Show) { Write-Host $line }
+  Status-FromLog $m
+}
+
+# ---------- status for the icon by the clock (status-tray.ps1 reads status.json) ----------
+$StatusFile = Join-Path $Dir 'status.json'
+$St = @{ version = $Version; state = 'running'; startedAt = (Get-Date -Format o); current = 'Starting'; audio = 0; reels = 0 }
+try { $old = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json; if ($old.lastProblem) { $St.lastProblem = $old.lastProblem; $St.lastProblemAt = $old.lastProblemAt } } catch {}
+function Save-Status {
+  try {
+    $tmp = $StatusFile + '.tmp'
+    [IO.File]::WriteAllText($tmp, ($St | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+    Move-Item -Path $tmp -Destination $StatusFile -Force
+  } catch {}
+}
+function Status-FromLog([string]$m) {
+  $t = $m.Trim()
+  if ($t -match '^Working on: (.+)$') { $St.current = 'Making audio: ' + $Matches[1] }
+  elseif ($t -match '^Reels: getting captions for (.+)$') { $St.current = 'Getting captions: ' + $Matches[1] }
+  elseif ($t -match '^Reels: making reel #(\d+) from (.+)$') { $St.current = "Making reel #$($Matches[1]): $($Matches[2])" }
+  elseif ($t -match '^Posts: making the (.+)$') { $St.current = 'Making the ' + $Matches[1] }
+  elseif ($t -match '^Done: ') { $St.audio++ }
+  elseif ($t -match '^Reel #\d+ made|^Made \d+ file') { $St.reels++ }
+  elseif ($t -match '^(Problem|Reel problem)[^:]*: (.+)$|^Could not ask|doesn.t accept this computer') { $St.lastProblem = $t; $St.lastProblemAt = (Get-Date -Format o) }
+  else { return }
+  Save-Status
 }
 
 # Keep the log short
@@ -41,6 +66,7 @@ if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt 1MB) {
 # Only one copy at a time
 $mutex = New-Object System.Threading.Mutex($false, 'Local\TNBCSermonAudio')
 if (-not $mutex.WaitOne(0)) { if ($Show) { Write-Host 'Already running.' }; exit 0 }
+Save-Status
 
 # Stay out of the way of whatever else the computer is doing
 try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch {}
@@ -183,6 +209,40 @@ public static class SermonFinder {
 }
 "@
 
+# ---------- the status icon by the clock (status-tray.ps1): keep it installed, up to date and running ----------
+$TrayFile = Join-Path $Dir 'status-tray.ps1'
+function Update-Tray {
+  try {
+    $tmp = Join-Path $Dir 'status-tray.new.ps1'
+    Invoke-WebRequest 'https://raw.githubusercontent.com/truenorthbaptist1/sermon-audio/main/windows/status-tray.ps1' -OutFile $tmp -UseBasicParsing -TimeoutSec 60
+    $new = Get-Content $tmp -Raw
+    $have = if (Test-Path $TrayFile) { Get-Content $TrayFile -Raw } else { '' }
+    $nv = if ($new -match 'TrayVersion ([\d.]+)') { [version]$Matches[1] } else { $null }
+    $hv = if ($have -match 'TrayVersion ([\d.]+)') { [version]$Matches[1] } else { [version]'0.0' }
+    if ($nv -and $nv -gt $hv -and $new -match 'Application\]::Run') { Copy-Item $tmp $TrayFile -Force; Log "Status icon updated to version $nv." }
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  } catch {}
+}
+function Start-Tray {
+  try {
+    if (-not (Test-Path $TrayFile)) { Update-Tray }
+    if (-not (Test-Path $TrayFile)) { return }
+    $off = Join-Path $Dir 'tray-off.txt'
+    if ((Test-Path $off) -and ((Get-Content $off -Raw).Trim() -eq (Get-Date -Format 'yyyy-MM-dd'))) { return }
+    $psArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File `"$TrayFile`""
+    # start it when you sign in
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $cmd = "powershell.exe $psArgs"
+    if ((Get-ItemProperty -Path $runKey -Name 'TNBC Sermon Audio status' -ErrorAction SilentlyContinue).'TNBC Sermon Audio status' -ne $cmd) {
+      Set-ItemProperty -Path $runKey -Name 'TNBC Sermon Audio status' -Value $cmd
+    }
+    # and now, if it isn't showing
+    $m = $null
+    if ([System.Threading.Mutex]::TryOpenExisting('Local\TNBCSermonAudioTray', [ref]$m)) { $m.Dispose(); return }
+    Start-Process powershell.exe -ArgumentList $psArgs -WindowStyle Hidden
+  } catch {}
+}
+
 # ---------- keep this program up to date (checks once a day; new version runs next time) ----------
 $selfStamp = Join-Path $Dir 'last-self-update.txt'
 if (-not (Test-Path $selfStamp) -or ((Get-Date) - (Get-Item $selfStamp).LastWriteTime).TotalHours -ge 20) {
@@ -197,8 +257,10 @@ if (-not (Test-Path $selfStamp) -or ((Get-Date) - (Get-Item $selfStamp).LastWrit
     }
     Remove-Item $newTmp -Force -ErrorAction SilentlyContinue
   } catch {}
+  Update-Tray
   Set-Content -Path $selfStamp -Value (Get-Date -Format o)
 }
+Start-Tray
 
 # ---------- keep yt-dlp up to date (YouTube changes often) ----------
 $stamp = Join-Path $Tools 'last-update.txt'
@@ -496,5 +558,11 @@ for ($n = 0; $n -lt $limit; $n++) {
   }
 }
 if ($made -or $Show) { Log "Finished: $made sermon(s) made this time." }
+$parts = @()
+if ($St.audio) { $parts += "$($St.audio) sermon(s)" }
+if ($St.reels) { $parts += "$($St.reels) reel(s) or post(s)" }
+$St.summary = if ($parts.Count) { 'made ' + ($parts -join ' and ') } else { 'nothing waiting' }
+$St.state = 'done'; $St.current = $null; $St.finishedAt = (Get-Date -Format o)
+Save-Status
 $mutex.ReleaseMutex()
 # SermonAudioEnd (marks a complete download of this file)

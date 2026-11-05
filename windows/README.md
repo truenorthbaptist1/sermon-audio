@@ -31,5 +31,10 @@ That's it. You can delete the `windows` folder from the Desktop afterwards; the 
 - It uses only free tools, downloaded from their official pages: yt-dlp, ffmpeg and deno.
 - It updates yt-dlp once a week, since YouTube changes often.
 - It runs at low priority and doesn't open any windows.
+- **Status icon by the clock** (from version 1.4.0): a coloured dot in the notification area. Blue = working (hover to
+  see what on), green = idle and fine, orange = the last run had a problem, grey = hasn't run yet. Click it for a
+  window with what it's doing, recent activity, and buttons for **Run now**, the full log and the manager page.
+  It starts when you sign in; the program installs and updates it by itself. If it's hidden behind the **^** arrow
+  by the clock, drag it down next to the clock. Right-click → **Hide until tomorrow** takes it away for the day.
 - To run it right away and watch: double-click **Run now.cmd** in `%LOCALAPPDATA%\TNBC Sermon Audio`.
 - Problems show on the admin page, and you get a phone alert if a sermon can't be made.
