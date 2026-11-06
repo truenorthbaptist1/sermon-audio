@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.0'
+$Version = '1.9.1'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -523,16 +523,26 @@ function FB-Video($job, [string]$work) {
     try { Invoke-WebRequest -Uri $u -OutFile $thumb -TimeoutSec 60 -UseBasicParsing; if ((Get-Item $thumb).Length -gt 5000) { break } } catch {}
   }
 
+  # 1.9.1: the video opens on the series thumbnail for 4 seconds (the user, Nov 5: the Jonah video started on
+  # the preacher), so Facebook's own preview frame is the series picture too, not just the cover set below.
+  $hasThumb = (Test-Path $thumb) -and (Get-Item $thumb).Length -gt 5000
   $filter = "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,fade=t=out:st=${fade}:d=1[m];" +
     "[0:a]aresample=48000,aformat=channel_layouts=stereo,afade=t=out:st=${fade}:d=1[ma];" +
-    "[2:v]scale=170:-1[lg];[1:v][lg]overlay=(W-w)/2:90,subtitles=endcard.ass:fontsdir=fonts,setsar=1,format=yuv420p[e];" +
-    "[m][ma][e][3:a]concat=n=2:v=1:a=1[v][a]"
-  $enc = Run-Tool 'ffmpeg.exe' @('-hide_banner', '-nostats', '-y', '-i', $src.Name,
+    "[2:v]scale=170:-1[lg];[1:v][lg]overlay=(W-w)/2:90,subtitles=endcard.ass:fontsdir=fonts,setsar=1,format=yuv420p[e];"
+  $inputs = @('-hide_banner', '-nostats', '-y', '-i', $src.Name,
     '-f', 'lavfi', '-t', '6', '-i', 'color=c=0x0b1626:s=1280x720:r=30', '-i', 'logo.png',
-    '-f', 'lavfi', '-t', '6', '-i', 'anullsrc=r=48000:cl=stereo',
+    '-f', 'lavfi', '-t', '6', '-i', 'anullsrc=r=48000:cl=stereo')
+  if ($hasThumb) {
+    $inputs += @('-loop', '1', '-framerate', '30', '-t', '4', '-i', 'thumb.jpg', '-f', 'lavfi', '-t', '4', '-i', 'anullsrc=r=48000:cl=stereo')
+    $filter += "[4:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,fade=t=out:st=3.5:d=0.5[i];" +
+      "[i][5:a][m][ma][e][3:a]concat=n=3:v=1:a=1[v][a]"
+  } else {
+    $filter += "[m][ma][e][3:a]concat=n=2:v=1:a=1[v][a]"
+  }
+  $enc = Run-Tool 'ffmpeg.exe' ($inputs + @(
     '-filter_complex', $filter, '-map', '[v]', '-map', '[a]',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-profile:v', 'high', '-level', '4.1',
-    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', 'fb.mp4') $work
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', 'fb.mp4')) $work
   $out = Join-Path $work 'fb.mp4'
   if ($enc.code -ne 0 -or -not (Test-Path $out) -or (Get-Item $out).Length -lt 100000) { throw ('Making the video failed: ' + (Last-Line $enc.err)) }
   $size = (Get-Item $out).Length
@@ -565,18 +575,33 @@ function FB-Video($job, [string]$work) {
     } finally { $fs.Close() }
     [void](Fb-Form $client $url @{ access_token = $tok; upload_phase = 'finish'; upload_session_id = $session
         title = [string]$job.fbTitle; description = [string]$job.description; published = 'true' } $null)
-    # the series thumbnail as the cover (a cover problem never stops the post)
-    if ((Test-Path $thumb) -and (Get-Item $thumb).Length -gt 5000) {
-      try {
-        $form = New-Object System.Net.Http.MultipartFormDataContent
-        $form.Add((New-Object System.Net.Http.StringContent($tok)), '"access_token"')
-        $form.Add((New-Object System.Net.Http.StringContent('true')), '"is_preferred"')
-        $ic = New-Object System.Net.Http.ByteArrayContent(, [IO.File]::ReadAllBytes($thumb))
-        $ic.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('image/jpeg')
-        $form.Add($ic, '"source"', '"thumb.jpg"')
-        $tr2 = $client.PostAsync("$graphHost/$($job.page.api)/$videoId/thumbnails", $form).Result
-        if (-not $tr2.IsSuccessStatusCode) { Log ('  Cover picture not set: ' + $tr2.Content.ReadAsStringAsync().Result) }
-      } catch { Log ('  Cover picture not set: ' + $_.Exception.Message) }
+    # the series thumbnail as the cover (a cover problem never stops the post). 1.9.1: Facebook ignores a cover
+    # sent while it is still processing the video, so wait until the video is ready (up to 20 minutes), then try
+    # up to 3 times.
+    if ($hasThumb) {
+      for ($w = 0; $w -lt 40; $w++) {
+        try {
+          $sr = $client.GetAsync("$graphHost/$($job.page.api)/$videoId" + '?fields=status&access_token=' + [Uri]::EscapeDataString($tok)).Result
+          $sj = $sr.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+          $vs = [string]$sj.status.video_status
+          if ($vs -eq 'ready' -or $vs -eq 'error') { break }
+        } catch {}
+        Start-Sleep -Seconds 30
+      }
+      for ($c = 1; $c -le 3; $c++) {
+        try {
+          $form = New-Object System.Net.Http.MultipartFormDataContent
+          $form.Add((New-Object System.Net.Http.StringContent($tok)), '"access_token"')
+          $form.Add((New-Object System.Net.Http.StringContent('true')), '"is_preferred"')
+          $ic = New-Object System.Net.Http.ByteArrayContent(, [IO.File]::ReadAllBytes($thumb))
+          $ic.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('image/jpeg')
+          $form.Add($ic, '"source"', '"thumb.jpg"')
+          $tr2 = $client.PostAsync("$graphHost/$($job.page.api)/$videoId/thumbnails", $form).Result
+          if ($tr2.IsSuccessStatusCode) { Log '  Cover picture set.'; break }
+          Log ('  Cover picture not set (try ' + $c + '): ' + $tr2.Content.ReadAsStringAsync().Result)
+        } catch { Log ('  Cover picture not set (try ' + $c + '): ' + $_.Exception.Message) }
+        Start-Sleep -Seconds 60
+      }
     }
   } finally { $client.Dispose() }
   Api '/api/fbvideo/done' @{ id = $job.id; videoId = $videoId } | Out-Null
