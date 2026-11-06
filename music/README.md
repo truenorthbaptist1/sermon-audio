@@ -89,3 +89,27 @@ Soft piano hymn music played under the preacher in sermon reels. New reels take 
 | gfc-40.m4a | 76 s | fuller | 41:19 |
 | gfc-41.m4a | 76 s | fuller | 42:35 |
 | gfc-42.m4a | 73 s | fuller | 43:51 |
+
+
+## Church recordings for sermon reels (`home-*.m4a`)
+
+Hymns played by a church family member on a home piano, recorded on a phone (Nov 2026). These are the church's own
+recordings, so there are no rights questions. They are meant to sit alongside the GFC beds in the sermon-reel rotation.
+
+- **Cleanup:** trimmed; 70 Hz high-pass; low shelf +5 dB at 180 Hz; −2 dB at 300 Hz and −5 dB at 1.6 kHz (boxiness);
+  harmonic exciter from 2.5 kHz plus a +6 dB shelf at 4 kHz (the phone recording was dull); a pocket at 2.2–3.3 kHz
+  so the piano doesn't cover the preacher's consonants (the same voice-band share as the GFC beds); light noise reduction;
+  0.4 s fade in and 2.5 s fade out (most takes stopped while the last chord was still ringing); −22 LUFS; 44.1 kHz AAC 128k.
+- Under the same voice and ducking, they sit within 1 dB of the GFC beds.
+
+| File | Hymn | Length |
+|---|---|---|
+| home-01-abide-with-me.m4a | Abide with Me | 81 s |
+| home-02-amazing-grace.m4a | Amazing Grace | 57 s |
+| home-03-crown-him.m4a | Crown Him with Many Crowns | 70 s |
+| home-04-blessed-assurance.m4a | Blessed Assurance | 85 s |
+| home-05-come-thou-fount.m4a | Come, Thou Fount | 67 s |
+| home-06-near-the-cross.m4a | Near the Cross | 74 s |
+| home-07-rescue-the-perishing.m4a | Rescue the Perishing | 62 s |
+| home-08-when-i-survey.m4a | When I Survey the Wondrous Cross | 75 s |
+| home-09-take-it-to-the-lord.m4a | What a Friend (Take It to the Lord in Prayer) | 68 s |
