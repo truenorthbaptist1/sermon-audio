@@ -1,17 +1,11 @@
-name: tray window test
+name: parse test
 on: { push: { branches: [tmp-tray], paths-ignore: ['shots/**'] } }
-permissions: { contents: write }
 jobs:
   win:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File ptest\tray.ps1
-      - if: always()
-        shell: bash
         run: |
-          mkdir -p shots && mv working.png idle.png full-working.png full-idle.png shots/ || true
-          git config user.name ci && git config user.email ci@example.com
-          git add shots && git commit -m "shots" && git push origin HEAD:tmp-tray
+          foreach ($f in 'windows\sermon-audio.ps1','windows\status-tray.ps1') { $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$e); if ($e.Count) { $e | % { Write-Host "$f : $($_.Message) line $($_.Extent.StartLineNumber)" }; exit 1 } else { Write-Host "$f parses" } }

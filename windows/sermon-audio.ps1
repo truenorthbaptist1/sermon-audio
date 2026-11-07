@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.1'
+$Version = '1.9.2'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -673,7 +673,11 @@ if (-not $helpersOk) { Reel-Work '' }
 
 # ---------- make audio ----------
 $made = 0
+# 1.9.2: keep going until the list is empty or the manager's limit is reached, but don't start a new sermon after
+# 3.5 hours: Task Scheduler ends a run at 4 hours, and the next hourly start carries on.
+$audioStart = Get-Date
 for ($n = 0; $n -lt $limit; $n++) {
+  if (((Get-Date) - $audioStart).TotalMinutes -ge 210) { Log 'This run has gone 3.5 hours; the next run carries on.'; break }
   try { $r = Api '/api/audio/next' @{ version = $Version; tools = "yt-dlp $ytv" } }
   catch { Log ('Could not ask for the next sermon: ' + (ApiError $_)); break }
   $job = $r.job
