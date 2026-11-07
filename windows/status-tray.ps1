@@ -151,7 +151,7 @@ $Icons = @{
   problem = (Dot ([System.Drawing.Color]::FromArgb(230, 140, 20))); unknown = (Dot ([System.Drawing.Color]::FromArgb(130, 130, 130)))
 }
 # the manager's app icon: navy rounded square with a white play button
-function Brand-Bitmap([int]$n) {
+function Brand-Bitmap([int]$n, [int[]]$rgb = @(31, 58, 95)) {
   $b = New-Object System.Drawing.Bitmap $n, $n
   $g = [System.Drawing.Graphics]::FromImage($b)
   $g.SmoothingMode = 'AntiAlias'
@@ -159,7 +159,7 @@ function Brand-Bitmap([int]$n) {
   $r = [int]($n * 0.22); $p = New-Object System.Drawing.Drawing2D.GraphicsPath
   $p.AddArc(0, 0, 2 * $r, 2 * $r, 180, 90); $p.AddArc($n - 2 * $r - 1, 0, 2 * $r, 2 * $r, 270, 90)
   $p.AddArc($n - 2 * $r - 1, $n - 2 * $r - 1, 2 * $r, 2 * $r, 0, 90); $p.AddArc(0, $n - 2 * $r - 1, 2 * $r, 2 * $r, 90, 90); $p.CloseFigure()
-  $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(31, 58, 95))), $p)
+  $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb($rgb[0], $rgb[1], $rgb[2]))), $p)
   $tri = [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF ($n * 0.38), ($n * 0.28)), (New-Object System.Drawing.PointF ($n * 0.38), ($n * 0.72)), (New-Object System.Drawing.PointF ($n * 0.74), ($n * 0.5)))
   $g.FillPolygon([System.Drawing.Brushes]::White, $tri)
   $g.Dispose()
@@ -255,7 +255,7 @@ $xaml = @'
       </DockPanel>
     </Border>
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-      <StackPanel Margin="16,16,16,6">
+      <StackPanel x:Name="Content" Margin="16,16,16,6">
         <Border x:Name="StatusCard" Style="{StaticResource Card}">
           <StackPanel>
             <TextBlock x:Name="StatusHead" FontSize="21" FontWeight="SemiBold"/>
@@ -320,10 +320,10 @@ $xaml = @'
 $win = [Windows.Markup.XamlReader]::Parse($xaml)
 $UI = @{}
 foreach ($n in 'HeadPill', 'HeadDot', 'HeadPillText', 'Logo', 'HeadSub', 'StatusCard', 'StatusHead', 'StatusDetail', 'StatusMeta', 'RunBtn', 'StopBtn', 'ProblemCard', 'ProblemHead', 'ProblemText',
-  'Parts', 'RunCounts', 'QueueWhen', 'Queue', 'Review', 'ReviewBtn', 'ManagerBtn', 'LogLink', 'Activity', 'HideLink', 'Foot') { $UI[$n] = $win.FindName($n) }
+  'Parts', 'RunCounts', 'Content', 'QueueWhen', 'Queue', 'Review', 'ReviewBtn', 'ManagerBtn', 'LogLink', 'Activity', 'HideLink', 'Foot') { $UI[$n] = $win.FindName($n) }
 $brandImg = To-WpfImage (Brand-Bitmap 64)
 $win.Icon = $brandImg
-$UI.Logo.Source = $brandImg
+$UI.Logo.Source = To-WpfImage (Brand-Bitmap 72 @(58, 92, 138))   # a lighter square so it shows on the navy header
 $UI.HeadSub.Text = 'Home computer ' + $Mid + ' ' + $env:COMPUTERNAME
 try { [System.Windows.Forms.Integration.ElementHost]::EnableModelessKeyboardInterop($win) } catch {}
 
@@ -525,6 +525,19 @@ function Refresh-Window {
   Fill-Queue
   Fill-Activity
   $UI.Foot.Text = 'True North Baptist Church ' + $Mid + ' this window updates by itself'
+  # for the Windows test only: save the whole window content as a picture
+  if ($env:TNBC_TRAY_SNAP) {
+    try {
+      $c = $UI.Content; $c.UpdateLayout()
+      $rt = New-Object System.Windows.Media.Imaging.RenderTargetBitmap ([int]$c.ActualWidth + 32), ([int]$c.ActualHeight + 22), 96, 96, ([System.Windows.Media.PixelFormats]::Pbgra32)
+      $dv = New-Object System.Windows.Media.DrawingVisual; $dc = $dv.RenderOpen()
+      $dc.DrawRectangle((B '#F6F7F9'), $null, (New-Object System.Windows.Rect 0, 0, ($c.ActualWidth + 32), ($c.ActualHeight + 22)))
+      $dc.DrawRectangle((New-Object System.Windows.Media.VisualBrush $c), $null, (New-Object System.Windows.Rect 16, 16, $c.ActualWidth, $c.ActualHeight)); $dc.Close()
+      $rt.Render($dv)
+      $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder; $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rt))
+      $fs = [IO.File]::Create($env:TNBC_TRAY_SNAP); $enc.Save($fs); $fs.Close()
+    } catch {}
+  }
 }
 
 $LastAsk = [datetime]::MinValue

@@ -27,6 +27,7 @@ Start-Sleep 600
 $holder = Start-Process powershell -ArgumentList '-NoProfile', '-File', $hold -PassThru -WindowStyle Hidden
 Start-Sleep 3
 
+$env:TNBC_TRAY_SNAP = Join-Path $PWD 'full.png'
 $tray = Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', (Join-Path $D 'status-tray.ps1'), '-Show' -PassThru -RedirectStandardError (Join-Path $PWD 'tray-err.txt') -RedirectStandardOutput (Join-Path $PWD 'tray-out.txt')
 function Shot($name) {
   $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -35,7 +36,7 @@ function Shot($name) {
   $b.Save((Join-Path $PWD $name)); Write-Host "shot $name $($s.Width)x$($s.Height)"
 }
 Start-Sleep 14
-Shot 'working.png'
+Shot 'working.png'; Copy-Item full.png full-working.png
 Write-Host ('tray alive: ' + -not $tray.HasExited)
 
 # a second start with -Show only signals the first one and leaves
@@ -47,7 +48,7 @@ Write-Host ('second copy left: ' + $second.HasExited)
 Stop-Process -Id $holder.Id -Force
 J @{ version = '1.9.0'; part = 'audio'; state = 'done'; startedAt = $now.AddMinutes(-30).ToString('o'); finishedAt = (Get-Date).ToString('o'); current = $null; audio = 4; reels = 0; summary = '4 sermons made'; lastProblem = 'Reel problem: ffmpeg could not read the video'; lastProblemAt = (Get-Date).AddMinutes(-20).ToString('o') } 'status.json'
 Start-Sleep 8
-Shot 'idle.png'
+Shot 'idle.png'; Copy-Item full.png full-idle.png
 $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'TNBC Sermon Manager.lnk'
 Write-Host ('start menu shortcut: ' + (Test-Path $lnk)); Write-Host ('desktop shortcut: ' + (Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'TNBC Sermon Manager.lnk')))
 Write-Host ('ico: ' + (Test-Path (Join-Path $D 'manager.ico')))
