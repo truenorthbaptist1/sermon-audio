@@ -1,0 +1,13 @@
+name: tray window test
+on: { push: { branches: [tmp-tray] } }
+jobs:
+  win:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ptest\tray.ps1
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: shots, path: "*.png" }

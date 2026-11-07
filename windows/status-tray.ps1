@@ -1,15 +1,26 @@
-# True North Baptist Church - Sermon audio: status icon by the clock (notification area)
+# True North Baptist Church - Sermon Manager on the home computer (status icon by the clock + its window)
 #
-# Shows at a glance whether the sermon audio / reels program is working, idle, or had a problem.
-# Click the icon for details (what it's doing now, recent activity) and buttons for Run now, the log and the
-# YouTube Manager. Started automatically when you sign in; the main program (sermon-audio.ps1) installs and
-# updates this file by itself. "Hide until tomorrow" in its menu takes it away for the day.
+# The coloured dot by the clock shows at a glance whether the program is working, idle, or had a problem.
+# Click it (or open "TNBC Sermon Manager" from the Start menu or the desktop) for the window: what each part is
+# doing right now, what is lined up next (asked from the manager), what waits for someone to review, recent
+# activity, and buttons for Run now, Stop, and the manager page. It looks like the manager page online.
+# Started automatically when you sign in; the main program (sermon-audio.ps1) installs and updates this file by
+# itself. "Hide the icon until tomorrow" takes it away for the day.
 #
-# TrayVersion 1.2.0
+# Keep this file plain ASCII: Windows PowerShell 5.1 reads scripts without a BOM as ANSI. Special characters are
+# made with [char] codes or XML entities.
+#
+# TrayVersion 2.0.0
+param([switch]$Show)
 
 $ErrorActionPreference = 'Continue'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+try { Add-Type -AssemblyName WindowsFormsIntegration } catch {}
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
 $Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Me = $MyInvocation.MyCommand.Path
@@ -17,39 +28,31 @@ $StatusFile = Join-Path $Dir 'status.json'
 $LogFile = Join-Path $Dir 'log.txt'
 $TaskName = 'TNBC Sermon Audio'
 $Manager = 'https://youtube-manager.truenorthbaptist1.workers.dev'
+$Mid = [string][char]0x00B7      # middle dot
+$Ell = [string][char]0x2026      # ...
 
-# Only one icon at a time
+# Only one icon at a time. Opening the shortcut while it runs just asks the running one to show its window.
 $trayMutex = New-Object System.Threading.Mutex($false, 'Local\TNBCSermonAudioTray')
-if (-not $trayMutex.WaitOne(0)) { exit 0 }
+$got = $false
+try { $got = $trayMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+$showEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Local\TNBCSermonAudioTrayShow')
+if (-not $got) { if ($Show) { [void]$showEvent.Set() }; exit 0 }
 $myStamp = (Get-Item $Me).LastWriteTime
 
+# ---------- reading the program's state ----------
 function Part-Running([string]$name) {
   # each part holds its own mutex while it runs (open the handle only for a moment)
   $m = $null
   if ([System.Threading.Mutex]::TryOpenExisting($name, [ref]$m)) { $m.Dispose(); return $true }
   return $false
 }
-function Is-Running {
-  return (Part-Running 'Local\TNBCSermonAudio') -or (Part-Running 'Local\TNBCSermonAudio-reels') -or (Part-Running 'Local\TNBCSermonAudio-posts')
-}
+$MutexOf = @{ audio = 'Local\TNBCSermonAudio'; reels = 'Local\TNBCSermonAudio-reels'; posts = 'Local\TNBCSermonAudio-posts' }
+function Is-Running { return (Part-Running $MutexOf.audio) -or (Part-Running $MutexOf.reels) -or (Part-Running $MutexOf.posts) }
+function Read-Json([string]$path) { try { return (Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null } }
+function Read-Status { return Read-Json $StatusFile }
+function Read-Helper([string]$part) { return Read-Json (Join-Path $Dir "status-$part.json") }
+function Read-Part([string]$part) { if ($part -eq 'audio') { return Read-Status } else { return Read-Helper $part } }
 
-function Read-Status {
-  try { return (Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
-}
-# the reels and posts helpers (program 1.5.0+) each keep their own status file
-function Read-Helper([string]$part) {
-  try { return (Get-Content (Join-Path $Dir "status-$part.json") -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
-}
-function Now-Lines {
-  $out = @()
-  $s = Read-Status
-  if ((Part-Running 'Local\TNBCSermonAudio') -and $s -and $s.state -eq 'running' -and $s.current) { $out += 'Audio: ' + $s.current }
-  foreach ($p in @('reels', 'posts')) {
-    $h = Read-Helper $p
-    if ((Part-Running "Local\TNBCSermonAudio-$p") -and $h -and $h.current) { $out += $(if ($p -eq 'reels') { 'Reels: ' } else { 'Posts: ' }) + $h.current }
-  }
-  return $out
-}
 # the newest problem from any part
 function Last-Problem {
   $best = $null
@@ -74,6 +77,65 @@ function Next-Check {
   return $null
 }
 
+# What one part is doing: @{ state = working|watching|idle; text }
+function Part-State([string]$part) {
+  $s = Read-Part $part
+  if (Part-Running $MutexOf[$part]) {
+    $cur = if ($s -and $s.current) { [string]$s.current } else { 'Starting' }
+    if ($cur -match '^(Watching for new|Checking for) ') { return @{ state = 'watching'; text = 'Waiting for new work (it looks once a minute)' } }
+    if ($cur -eq 'Starting') { return @{ state = 'working'; text = 'Starting' } }
+    return @{ state = 'working'; text = $cur }
+  }
+  if ($s -and $s.finishedAt) { return @{ state = 'idle'; text = 'Not running ' + $Mid + ' last finished ' + (When $s.finishedAt) } }
+  return @{ state = 'idle'; text = 'Not running' }
+}
+
+# The overall state: @{ kind; headline; detail }
+function Summary {
+  $s = Read-Status
+  $lp = Last-Problem
+  $problemRecent = $lp -and ([datetime]::Parse($lp.lastProblemAt) -gt (Get-Date).AddHours(-3))
+  if (Is-Running) {
+    $busy = @(@('audio', 'reels', 'posts') | Where-Object { (Part-State $_).state -eq 'working' })
+    $what = if ($busy.Count) { 'Busy with: ' + (($busy | ForEach-Object { @{ audio = 'sermon audio'; reels = 'reels'; posts = 'posts and Facebook videos' }[$_] }) -join ', ') } else { 'Checking for work' }
+    return @{ kind = 'working'; headline = 'Working on it'; detail = $what }
+  }
+  if (-not $s) { return @{ kind = 'unknown'; headline = 'Waiting for its first run'; detail = 'It runs a few minutes after you sign in, then every hour.' } }
+  $ended = if ($s.finishedAt) { $s.finishedAt } else { (Get-Item $StatusFile).LastWriteTime.ToString('o') }
+  $line = 'Last run ended ' + (When $ended)
+  if ($s.summary) { $line += ': ' + $s.summary }
+  if ($problemRecent) { return @{ kind = 'problem'; headline = 'Idle, but there was a problem'; detail = $line } }
+  return @{ kind = 'ok'; headline = 'Idle, all good'; detail = $line }
+}
+
+# ---------- what is lined up (asked from the manager, without freezing the window) ----------
+$Cfg = Read-Json (Join-Path $Dir 'config.json')
+$Code = $null
+try { $sec = $Cfg.code | ConvertTo-SecureString; $Code = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)) } catch {}
+$Server = if ($Cfg -and $Cfg.server) { ([string]$Cfg.server).TrimEnd('/') } else { $Manager }
+$Overview = $null; $OverviewAt = $null; $OverviewErr = $null; $OverviewTask = $null; $OverviewClient = $null
+function Ask-Overview {
+  if ($script:OverviewTask -or -not $Code) { return }
+  try {
+    $wc = New-Object System.Net.WebClient
+    $wc.Encoding = [Text.Encoding]::UTF8
+    $wc.Headers.Add('Authorization', "Bearer $Code")
+    $script:OverviewClient = $wc
+    $script:OverviewTask = $wc.DownloadStringTaskAsync($Server + '/api/pc/overview')
+  } catch { $script:OverviewErr = $_.Exception.Message }
+}
+# called from the timer: picks up a finished answer (no callbacks into PowerShell from other threads)
+function Take-Overview {
+  $t = $script:OverviewTask
+  if (-not $t -or -not $t.IsCompleted) { return $false }
+  $script:OverviewTask = $null
+  try { $script:OverviewClient.Dispose() } catch {}
+  if ($t.IsFaulted -or $t.IsCanceled) { $script:OverviewErr = 'no answer'; return $true }
+  try { $script:Overview = $t.Result | ConvertFrom-Json; $script:OverviewAt = Get-Date; $script:OverviewErr = $null } catch { $script:OverviewErr = 'unreadable answer' }
+  return $true
+}
+
+# ---------- pictures ----------
 function Dot([System.Drawing.Color]$c) {
   $b = New-Object System.Drawing.Bitmap 16, 16
   $g = [System.Drawing.Graphics]::FromImage($b)
@@ -84,94 +146,410 @@ function Dot([System.Drawing.Color]$c) {
   $g.Dispose()
   return [System.Drawing.Icon]::FromHandle($b.GetHicon())
 }
-$Green = [System.Drawing.Color]::FromArgb(46, 160, 67)
-$Blue = [System.Drawing.Color]::FromArgb(40, 110, 220)
-$Orange = [System.Drawing.Color]::FromArgb(230, 140, 20)
-$Gray = [System.Drawing.Color]::FromArgb(130, 130, 130)
-$Icons = @{ working = (Dot $Blue); ok = (Dot $Green); problem = (Dot $Orange); unknown = (Dot $Gray) }
-
-# What to show: returns @{ kind; headline; detail }
-function Summary {
-  $s = Read-Status
-  $running = Is-Running
-  $lp = Last-Problem
-  $problemToday = $lp -and ([datetime]::Parse($lp.lastProblemAt) -gt (Get-Date).AddHours(-3))
-  if ($running) {
-    $nl = @(Now-Lines)
-    $now = if ($nl.Count) { $nl -join "`r`n" } else { 'Checking for work' }
-    return @{ kind = 'working'; headline = 'Working'; detail = $now }
-  }
-  if (-not $s) { return @{ kind = 'unknown'; headline = 'Waiting for its first run'; detail = 'It runs a few minutes after you sign in, then every hour.' } }
-  $ended = if ($s.finishedAt) { $s.finishedAt } else { (Get-Item $StatusFile).LastWriteTime.ToString('o') }
-  $line = 'Last run ended ' + (When $ended)
-  if ($s.summary) { $line += ': ' + $s.summary }
-  if ($problemToday) { return @{ kind = 'problem'; headline = 'Idle, but there was a problem'; detail = $line } }
-  return @{ kind = 'ok'; headline = 'Idle, all good'; detail = $line }
+$Icons = @{
+  working = (Dot ([System.Drawing.Color]::FromArgb(40, 110, 220))); ok = (Dot ([System.Drawing.Color]::FromArgb(46, 160, 67)))
+  problem = (Dot ([System.Drawing.Color]::FromArgb(230, 140, 20))); unknown = (Dot ([System.Drawing.Color]::FromArgb(130, 130, 130)))
 }
-
-# ---------- the status window ----------
-$form = New-Object System.Windows.Forms.Form
-$form.Text = 'Sermon audio - True North Baptist Church'
-$form.Size = New-Object System.Drawing.Size(620, 520)
-$form.StartPosition = 'CenterScreen'
-$form.FormBorderStyle = 'FixedDialog'
-$form.MaximizeBox = $false
-$form.ShowInTaskbar = $true
-$form.Icon = $Icons.ok
-$form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
-
-$head = New-Object System.Windows.Forms.Label
-$head.Location = '16,14'; $head.Size = '570,30'
-$head.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 14)
-$form.Controls.Add($head)
-
-$detail = New-Object System.Windows.Forms.Label
-$detail.Location = '16,48'; $detail.Size = '570,64'
-$form.Controls.Add($detail)
-
-$info = New-Object System.Windows.Forms.Label
-$info.Location = '16,114'; $info.Size = '570,64'
-$info.ForeColor = [System.Drawing.Color]::FromArgb(90, 90, 90)
-$form.Controls.Add($info)
-
-$logLabel = New-Object System.Windows.Forms.Label
-$logLabel.Location = '16,182'; $logLabel.Size = '300,20'; $logLabel.Text = 'Recent activity'
-$logLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
-$form.Controls.Add($logLabel)
-
-$log = New-Object System.Windows.Forms.TextBox
-$log.Location = '16,204'; $log.Size = '572,212'
-$log.Multiline = $true; $log.ReadOnly = $true; $log.ScrollBars = 'Vertical'; $log.WordWrap = $false
-$log.Font = New-Object System.Drawing.Font('Consolas', 9)
-$log.BackColor = [System.Drawing.Color]::White
-$form.Controls.Add($log)
-
-function Button([string]$text, [int]$x, [scriptblock]$click) {
-  $b = New-Object System.Windows.Forms.Button
-  $b.Text = $text; $b.Location = "$x,430"; $b.Size = '110,34'
-  $b.Add_Click($click)
-  $form.Controls.Add($b)
+# the manager's app icon: navy rounded square with a white play button
+function Brand-Bitmap([int]$n) {
+  $b = New-Object System.Drawing.Bitmap $n, $n
+  $g = [System.Drawing.Graphics]::FromImage($b)
+  $g.SmoothingMode = 'AntiAlias'
+  $g.Clear([System.Drawing.Color]::Transparent)
+  $r = [int]($n * 0.22); $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $p.AddArc(0, 0, 2 * $r, 2 * $r, 180, 90); $p.AddArc($n - 2 * $r - 1, 0, 2 * $r, 2 * $r, 270, 90)
+  $p.AddArc($n - 2 * $r - 1, $n - 2 * $r - 1, 2 * $r, 2 * $r, 0, 90); $p.AddArc(0, $n - 2 * $r - 1, 2 * $r, 2 * $r, 90, 90); $p.CloseFigure()
+  $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(31, 58, 95))), $p)
+  $tri = [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF ($n * 0.38), ($n * 0.28)), (New-Object System.Drawing.PointF ($n * 0.38), ($n * 0.72)), (New-Object System.Drawing.PointF ($n * 0.74), ($n * 0.5)))
+  $g.FillPolygon([System.Drawing.Brushes]::White, $tri)
+  $g.Dispose()
   return $b
 }
-$runBtn = Button 'Run now' 16 { Run-Now }
-$stopBtn = Button 'Stop this run' 132 { Stop-Run }
-[void](Button 'Open full log' 248 { Start-Process notepad.exe $LogFile })
-[void](Button 'Manager page' 364 { Start-Process $Manager })
-[void](Button 'Close' 480 { $form.Hide() })
-$form.Add_FormClosing({ param($s, $e) if ($e.CloseReason -eq 'UserClosing') { $e.Cancel = $true; $form.Hide() } })
-
-function Run-Now {
-  if (Is-Running) { [System.Windows.Forms.MessageBox]::Show('It is already working. It will pick up everything waiting before it stops.', 'Sermon audio') | Out-Null; return }
-  try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop; $tray.ShowBalloonTip(3000, 'Sermon audio', 'Starting now.', 'Info') }
-  catch { [System.Windows.Forms.MessageBox]::Show('Could not start it: ' + $_.Exception.Message, 'Sermon audio') | Out-Null }
+function To-WpfImage([System.Drawing.Bitmap]$b) {
+  $ms = New-Object IO.MemoryStream
+  $b.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $ms.Position = 0
+  $img = New-Object System.Windows.Media.Imaging.BitmapImage
+  $img.BeginInit(); $img.CacheOption = 'OnLoad'; $img.StreamSource = $ms; $img.EndInit(); $img.Freeze()
+  return $img
 }
 
-# Stop button (1.2.0): ends all three parts and the programs they started (ffmpeg, yt-dlp), then tells the
-# manager, which hands any half-made sermon, reel or post straight back so the next run starts it again.
+# ---------- Start menu and desktop shortcuts that open the window ----------
+function Ensure-Shortcuts {
+  try {
+    $ico = Join-Path $Dir 'manager.ico'
+    if (-not (Test-Path $ico)) {
+      $ms = New-Object IO.MemoryStream; (Brand-Bitmap 256).Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $png = $ms.ToArray()
+      $out = New-Object IO.MemoryStream; $w = New-Object IO.BinaryWriter($out)
+      $w.Write([uint16]0); $w.Write([uint16]1); $w.Write([uint16]1)
+      $w.Write([byte]0); $w.Write([byte]0); $w.Write([byte]0); $w.Write([byte]0)
+      $w.Write([uint16]1); $w.Write([uint16]32); $w.Write([uint32]$png.Length); $w.Write([uint32]22); $w.Write($png); $w.Flush()
+      [IO.File]::WriteAllBytes($ico, $out.ToArray())
+    }
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $psArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File `"$Me`" -Show"
+    $shell = New-Object -ComObject WScript.Shell
+    $places = @(Join-Path ([Environment]::GetFolderPath('Programs')) 'TNBC Sermon Manager.lnk')
+    # the desktop one only once: if it is deleted, it stays deleted
+    $mark = Join-Path $Dir 'desktop-shortcut.txt'
+    if (-not (Test-Path $mark)) { $places += (Join-Path ([Environment]::GetFolderPath('Desktop')) 'TNBC Sermon Manager.lnk'); Set-Content -Path $mark -Value (Get-Date -Format o) }
+    foreach ($lnk in $places) {
+      if ((Test-Path $lnk) -and ($shell.CreateShortcut($lnk).Arguments -eq $psArgs)) { continue }
+      $sc = $shell.CreateShortcut($lnk)
+      $sc.TargetPath = $ps; $sc.Arguments = $psArgs; $sc.WorkingDirectory = $Dir; $sc.IconLocation = "$ico,0"
+      $sc.WindowStyle = 7; $sc.Description = 'Sermon Manager on this computer: what it is doing and what is coming up'
+      $sc.Save()
+    }
+  } catch {}
+}
+
+# ---------- the window ----------
+$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  Title="Sermon Manager - True North Baptist Church" Width="660" Height="880" MinWidth="520" MinHeight="420"
+  WindowStartupLocation="CenterScreen" Background="#F6F7F9" FontFamily="Segoe UI" FontSize="14" Foreground="#1D2433"
+  UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display">
+  <Window.Resources>
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="#E3E6EC"/><Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="14"/><Setter Property="Padding" Value="18,16"/><Setter Property="Margin" Value="0,0,0,14"/>
+    </Style>
+    <Style x:Key="H2" TargetType="TextBlock"><Setter Property="FontSize" Value="17"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Margin" Value="0,0,0,10"/></Style>
+    <Style x:Key="Link" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#1F3A5F"/><Setter Property="Cursor" Value="Hand"/><Setter Property="FontWeight" Value="SemiBold"/>
+      <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="TextDecorations" Value="Underline"/></Trigger></Style.Triggers>
+    </Style>
+    <Style x:Key="Primary" TargetType="Button">
+      <Setter Property="Foreground" Value="White"/><Setter Property="Background" Value="#1F3A5F"/><Setter Property="BorderBrush" Value="#1F3A5F"/>
+      <Setter Property="Padding" Value="18,9"/><Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="B" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="{TemplateBinding Padding}">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="B" Property="Opacity" Value="0.88"/></Trigger>
+            <Trigger Property="IsPressed" Value="True"><Setter TargetName="B" Property="Opacity" Value="0.72"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="B" Property="Opacity" Value="0.4"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style x:Key="Secondary" TargetType="Button" BasedOn="{StaticResource Primary}">
+      <Setter Property="Foreground" Value="#1F3A5F"/><Setter Property="Background" Value="White"/>
+    </Style>
+  </Window.Resources>
+  <DockPanel>
+    <Border DockPanel.Dock="Top" Background="#1F3A5F" Padding="18,14">
+      <DockPanel>
+        <Border x:Name="HeadPill" DockPanel.Dock="Right" CornerRadius="99" Padding="12,5" VerticalAlignment="Center" Background="#2EFFFFFF">
+          <StackPanel Orientation="Horizontal">
+            <Ellipse x:Name="HeadDot" Width="9" Height="9" Margin="0,0,7,0" VerticalAlignment="Center" Fill="White"/>
+            <TextBlock x:Name="HeadPillText" Foreground="White" FontWeight="SemiBold" FontSize="13"/>
+          </StackPanel>
+        </Border>
+        <Image x:Name="Logo" DockPanel.Dock="Left" Width="36" Height="36" Margin="0,0,12,0"/>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock Text="Sermon Manager" Foreground="White" FontSize="19" FontWeight="SemiBold"/>
+          <TextBlock x:Name="HeadSub" Foreground="#C9D4E4" FontSize="12.5"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel Margin="16,16,16,6">
+        <Border x:Name="StatusCard" Style="{StaticResource Card}">
+          <StackPanel>
+            <TextBlock x:Name="StatusHead" FontSize="21" FontWeight="SemiBold"/>
+            <TextBlock x:Name="StatusDetail" TextWrapping="Wrap" Margin="0,4,0,0"/>
+            <TextBlock x:Name="StatusMeta" TextWrapping="Wrap" Foreground="#5B6475" FontSize="13" Margin="0,6,0,0"/>
+            <WrapPanel Margin="0,14,0,0">
+              <Button x:Name="RunBtn" Style="{StaticResource Primary}" Content="Run now" Margin="0,0,10,0"/>
+              <Button x:Name="StopBtn" Style="{StaticResource Secondary}" Content="Stop this run"/>
+            </WrapPanel>
+          </StackPanel>
+        </Border>
+        <Border x:Name="ProblemCard" Visibility="Collapsed" Background="#FDECEC" BorderBrush="#9B1C1C" BorderThickness="4,0,0,0" CornerRadius="8" Padding="14,10" Margin="0,0,0,14">
+          <StackPanel>
+            <TextBlock x:Name="ProblemHead" FontWeight="SemiBold" Foreground="#9B1C1C"/>
+            <TextBlock x:Name="ProblemText" TextWrapping="Wrap" Margin="0,3,0,0"/>
+          </StackPanel>
+        </Border>
+        <Border Style="{StaticResource Card}">
+          <StackPanel>
+            <TextBlock Text="In progress" Style="{StaticResource H2}"/>
+            <StackPanel x:Name="Parts"/>
+            <TextBlock x:Name="RunCounts" Foreground="#5B6475" FontSize="13" Margin="0,8,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+        </Border>
+        <Border Style="{StaticResource Card}">
+          <StackPanel>
+            <DockPanel>
+              <TextBlock x:Name="QueueWhen" DockPanel.Dock="Right" Foreground="#5B6475" FontSize="12.5" VerticalAlignment="Top" Margin="0,3,0,0"/>
+              <TextBlock Text="Coming up for this computer" Style="{StaticResource H2}"/>
+            </DockPanel>
+            <StackPanel x:Name="Queue"/>
+          </StackPanel>
+        </Border>
+        <Border Style="{StaticResource Card}">
+          <StackPanel>
+            <TextBlock Text="Waiting for you" Style="{StaticResource H2}"/>
+            <StackPanel x:Name="Review"/>
+            <WrapPanel Margin="0,12,0,0">
+              <Button x:Name="ReviewBtn" Style="{StaticResource Primary}" Content="Review now" Margin="0,0,10,0"/>
+              <Button x:Name="ManagerBtn" Style="{StaticResource Secondary}" Content="Open the manager page"/>
+            </WrapPanel>
+          </StackPanel>
+        </Border>
+        <Border Style="{StaticResource Card}">
+          <StackPanel>
+            <DockPanel>
+              <TextBlock x:Name="LogLink" DockPanel.Dock="Right" Text="Open full log" Style="{StaticResource Link}" FontSize="13" Margin="0,3,0,0"/>
+              <TextBlock Text="Recent activity" Style="{StaticResource H2}"/>
+            </DockPanel>
+            <StackPanel x:Name="Activity"/>
+          </StackPanel>
+        </Border>
+        <DockPanel Margin="4,0,4,10">
+          <TextBlock x:Name="HideLink" DockPanel.Dock="Right" Text="Hide the icon until tomorrow" Style="{StaticResource Link}" FontWeight="Normal" FontSize="12.5"/>
+          <TextBlock x:Name="Foot" Foreground="#5B6475" FontSize="12.5"/>
+        </DockPanel>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>
+'@
+$win = [Windows.Markup.XamlReader]::Parse($xaml)
+$UI = @{}
+foreach ($n in 'HeadPill', 'HeadDot', 'HeadPillText', 'Logo', 'HeadSub', 'StatusCard', 'StatusHead', 'StatusDetail', 'StatusMeta', 'RunBtn', 'StopBtn', 'ProblemCard', 'ProblemHead', 'ProblemText',
+  'Parts', 'RunCounts', 'QueueWhen', 'Queue', 'Review', 'ReviewBtn', 'ManagerBtn', 'LogLink', 'Activity', 'HideLink', 'Foot') { $UI[$n] = $win.FindName($n) }
+$brandImg = To-WpfImage (Brand-Bitmap 64)
+$win.Icon = $brandImg
+$UI.Logo.Source = $brandImg
+$UI.HeadSub.Text = 'Home computer ' + $Mid + ' ' + $env:COMPUTERNAME
+try { [System.Windows.Forms.Integration.ElementHost]::EnableModelessKeyboardInterop($win) } catch {}
+
+$Conv = New-Object System.Windows.Media.BrushConverter
+function B([string]$hex) { return $Conv.ConvertFromString($hex) }
+$Muted = B '#5B6475'
+$Kinds = @{
+  working = @{ bg = '#EAF1FB'; line = '#C3D5EE'; ink = '#1F3A5F'; dot = '#4D9BFF'; pill = 'Working' }
+  ok      = @{ bg = '#E9F6EE'; line = '#B9DFC6'; ink = '#1D6B3A'; dot = '#5BD17F'; pill = 'Idle' }
+  problem = @{ bg = '#FFF6E5'; line = '#F1D29B'; ink = '#9A5B00'; dot = '#FFB547'; pill = 'Needs a look' }
+  unknown = @{ bg = '#FFFFFF'; line = '#E3E6EC'; ink = '#5B6475'; dot = '#B8BFCC'; pill = 'Not started' }
+}
+
+function T([string]$text, [double]$size = 14, [string]$weight = 'Normal', $color = $null) {
+  $t = New-Object System.Windows.Controls.TextBlock
+  $t.Text = $text; $t.FontSize = $size; $t.TextWrapping = 'Wrap'
+  if ($weight -ne 'Normal') { $t.FontWeight = [System.Windows.FontWeights]::$weight }
+  if ($color) { $t.Foreground = $(if ($color -is [string]) { B $color } else { $color }) }
+  return $t
+}
+function Pill([string]$text, [string]$bg, [string]$fg) {
+  $b = New-Object System.Windows.Controls.Border
+  $b.CornerRadius = New-Object System.Windows.CornerRadius 99
+  $b.Padding = New-Object System.Windows.Thickness 10, 2, 10, 3
+  $b.Background = B $bg; $b.VerticalAlignment = 'Top'
+  $t = T $text 12 'SemiBold' $fg
+  $t.TextWrapping = 'NoWrap'
+  $b.Child = $t
+  return $b
+}
+function Spot([string]$hex, [double]$size = 10) {
+  $e = New-Object System.Windows.Shapes.Ellipse
+  $e.Width = $size; $e.Height = $size; $e.Fill = B $hex; $e.VerticalAlignment = 'Top'
+  $e.Margin = New-Object System.Windows.Thickness 0, 6, 12, 0
+  return $e
+}
+function Rule {
+  $r = New-Object System.Windows.Controls.Border
+  $r.Height = 1; $r.Background = B '#E3E6EC'; $r.Margin = New-Object System.Windows.Thickness 0, 10, 0, 10
+  return $r
+}
+function Add([System.Windows.Controls.Panel]$p, $child) { [void]$p.Children.Add($child) }
+
+# one row: dot | title + text (+ list) | pill
+function Row([string]$dot, [string]$title, [string]$text, $pill, [string[]]$items = @(), [int]$more = 0, [switch]$Busy) {
+  $d = New-Object System.Windows.Controls.DockPanel
+  $d.LastChildFill = $true
+  if ($pill) { [System.Windows.Controls.DockPanel]::SetDock($pill, 'Right'); Add $d $pill }
+  $sp = Spot $dot; [System.Windows.Controls.DockPanel]::SetDock($sp, 'Left'); Add $d $sp
+  $st = New-Object System.Windows.Controls.StackPanel
+  Add $st (T $title 14.5 'SemiBold')
+  if ($text) { $x = T $text 13.5 'Normal' $Muted; $x.Margin = New-Object System.Windows.Thickness 0, 1, 8, 0; Add $st $x }
+  foreach ($i in $items) { $x = T ('    ' + $Mid + '  ' + $i) 13 'Normal' '#1D2433'; $x.Margin = New-Object System.Windows.Thickness 0, 2, 8, 0; Add $st $x }
+  if ($more -gt 0) { $x = T ("    and $more more") 13 'Normal' $Muted; $x.Margin = New-Object System.Windows.Thickness 0, 2, 0, 0; Add $st $x }
+  if ($Busy) {
+    $pb = New-Object System.Windows.Controls.ProgressBar
+    $pb.IsIndeterminate = $true; $pb.Height = 4; $pb.Margin = New-Object System.Windows.Thickness 0, 7, 8, 0
+    $pb.Foreground = B '#4D7FC0'; $pb.Background = B '#E6ECF4'; $pb.BorderThickness = New-Object System.Windows.Thickness 0
+    Add $st $pb
+  }
+  Add $d $st
+  return $d
+}
+
+# ---------- filling it in ----------
+$Sig = @{}
+function Changed([string]$key, [string]$value) { if ($Sig[$key] -eq $value) { return $false }; $Sig[$key] = $value; return $true }
+
+function Fill-Status($sum) {
+  $k = $Kinds[$sum.kind]
+  $UI.StatusCard.Background = B $k.bg; $UI.StatusCard.BorderBrush = B $k.line
+  $UI.StatusHead.Text = $sum.headline; $UI.StatusHead.Foreground = B $k.ink
+  $UI.StatusDetail.Text = $sum.detail
+  $UI.HeadPillText.Text = $k.pill; $UI.HeadDot.Fill = B $k.dot
+  $s = Read-Status
+  $nc = Next-Check
+  $v = if ($s -and $s.version) { 'Program ' + $s.version } else { 'Program version unknown' }
+  $UI.StatusMeta.Text = $v + ' ' + $Mid + ' ' + $(if ($sum.kind -eq 'working') { 'checks every hour while the computer is on' } elseif ($nc) { "next check at $nc" } else { 'checks every hour while the computer is on' })
+  $UI.RunBtn.IsEnabled = $sum.kind -ne 'working'
+  $UI.StopBtn.IsEnabled = $sum.kind -eq 'working'
+  $lp = Last-Problem
+  if ($lp -and ([datetime]::Parse($lp.lastProblemAt) -gt (Get-Date).AddHours(-24))) {
+    $UI.ProblemCard.Visibility = 'Visible'
+    $UI.ProblemHead.Text = 'Last problem ' + $Mid + ' ' + (When $lp.lastProblemAt)
+    $UI.ProblemText.Text = [string]$lp.lastProblem
+  } else { $UI.ProblemCard.Visibility = 'Collapsed' }
+}
+
+$PartNames = [ordered]@{ audio = 'Sermon audio'; reels = 'Instagram reels'; posts = 'Posts and Facebook videos' }
+function Fill-Parts {
+  $rows = @()
+  foreach ($p in $PartNames.Keys) { $ps = Part-State $p; $rows += @{ p = $p; st = $ps.state; text = $ps.text } }
+  $s = Read-Status; $hr = Read-Helper 'reels'; $hp = Read-Helper 'posts'
+  $counts = ''
+  if ($s -and $s.state -eq 'running') {
+    $made = [int]$s.reels + [int]$(if ($hr -and $hr.startedAt -ge $s.startedAt) { $hr.reels } else { 0 }) + [int]$(if ($hp -and $hp.startedAt -ge $s.startedAt) { $hp.reels } else { 0 })
+    $counts = "This run (started $(When $s.startedAt)): $([int]$s.audio) sermon(s) and $made reel(s) or post(s) made so far"
+  } elseif ($s -and $s.summary) { $counts = 'Last run: ' + $s.summary }
+  if (-not (Changed 'parts' (($rows | ForEach-Object { $_.p + $_.st + $_.text }) -join '|'))) { $UI.RunCounts.Text = $counts; return }
+  $UI.Parts.Children.Clear()
+  $first = $true
+  foreach ($r in $rows) {
+    if (-not $first) { Add $UI.Parts (Rule) }; $first = $false
+    switch ($r.st) {
+      'working' { Add $UI.Parts (Row '#2E6EDC' $PartNames[$r.p] $r.text (Pill 'Working' '#EAF1FB' '#1F3A5F') -Busy) }
+      'watching' { Add $UI.Parts (Row '#7FA6D9' $PartNames[$r.p] $r.text (Pill 'Ready' '#EEF2F7' '#3D5577')) }
+      default { Add $UI.Parts (Row '#B8BFCC' $PartNames[$r.p] $r.text (Pill 'Idle' '#F0F2F5' '#5B6475')) }
+    }
+  }
+  $UI.RunCounts.Text = $counts
+}
+
+function Count-Pill([int]$n, [string]$word) {
+  if ($n -le 0) { return (Pill 'none' '#F0F2F5' '#5B6475') }
+  return (Pill "$n $word" '#EAF1FB' '#1F3A5F')
+}
+function Fill-Queue {
+  $o = $script:Overview
+  $UI.QueueWhen.Text = $(if ($script:OverviewAt) { 'updated ' + $script:OverviewAt.ToString('h:mm tt') } else { '' })
+  $sig = if ($o) { $o | ConvertTo-Json -Depth 6 -Compress } elseif (-not $Code) { 'nocode' } else { 'err' + $script:OverviewErr }
+  if (-not (Changed 'queue' $sig)) { return }
+  $UI.Queue.Children.Clear(); $UI.Review.Children.Clear()
+  if (-not $o) {
+    $msg = if (-not $Code) { 'This computer has no manager code, so it cannot ask what is coming up.' } elseif ($script:OverviewErr) { 'The manager could not be reached just now (is the internet on?). It tries again in a minute.' } else { 'Asking the manager' + $Ell }
+    Add $UI.Queue (T $msg 13.5 'Normal' $Muted)
+    Add $UI.Review (T $msg 13.5 'Normal' $Muted)
+    $UI.ReviewBtn.Visibility = 'Collapsed'
+    return
+  }
+  $blocks = @(
+    @{ t = 'Sermon audio'; now = @($o.audio.making); next = @($o.audio.next); n = [int]$o.audio.waiting; w = 'waiting'; extra = $(if ([int]$o.audio.failed) { "$($o.audio.failed) could not be made (see the manager)" } else { '' }) },
+    @{ t = 'Instagram reels'; now = @($o.reels.making.items); next = @($o.reels.toMake.items); n = [int]$o.reels.toMake.count; w = 'to make'; extra = '' },
+    @{ t = 'Scripture and question posts'; now = @($o.posts.making.items); next = @($o.posts.toMake.items); n = [int]$o.posts.toMake.count; w = 'to make'; extra = '' },
+    @{ t = 'Full sermons for Facebook'; now = @($o.facebook.making.items); next = @($o.facebook.waiting.items); n = [int]$o.facebook.waiting.count; w = 'waiting'; extra = '' }
+  )
+  $first = $true
+  $any = $false
+  foreach ($bk in $blocks) {
+    if (-not $first) { Add $UI.Queue (Rule) }; $first = $false
+    $items = @(); foreach ($x in $bk.now) { if ($x) { $items += 'Now: ' + $x } }
+    $shown = @($bk.next | Where-Object { $_ } | Select-Object -First 4)
+    $items += $shown
+    $more = [Math]::Max(0, $bk.n - $shown.Count)
+    $text = if ($bk.n -eq 0 -and -not @($bk.now | Where-Object { $_ }).Count) { 'Nothing waiting' } elseif ($bk.extra) { $bk.extra } else { '' }
+    if ($bk.n -gt 0 -or @($bk.now | Where-Object { $_ }).Count) { $any = $true }
+    $dot = if (@($bk.now | Where-Object { $_ }).Count) { '#2E6EDC' } elseif ($bk.n -gt 0) { '#7FA6D9' } else { '#B8BFCC' }
+    Add $UI.Queue (Row $dot $bk.t $text (Count-Pill $bk.n $bk.w) $items $more)
+  }
+  if ($any -and -not (Is-Running)) {
+    $nc = Next-Check
+    $x = T ('It picks these up at the next check' + $(if ($nc) { " ($nc)" } else { '' }) + ', or click Run now.') 13 'Normal' $Muted
+    $x.Margin = New-Object System.Windows.Thickness 0, 12, 0, 0
+    Add $UI.Queue $x
+  }
+
+  # waiting for a person
+  $rr = [int]$o.review.reels.count; $rp = [int]$o.review.posts.count
+  if ($rr + $rp -eq 0) {
+    Add $UI.Review (Row '#5BD17F' 'Nothing to review' $(if ([int]$o.approved) { "$($o.approved) approved and waiting for their posting day" } else { 'New reels and posts show up here when they are ready.' }) $null)
+    $UI.ReviewBtn.Visibility = 'Collapsed'
+  } else {
+    $items = @(@($o.review.reels.items) + @($o.review.posts.items) | Where-Object { $_ } | Select-Object -First 6)
+    $parts = @(); if ($rr) { $parts += "$rr reel$(if ($rr -ne 1) { 's' })" }; if ($rp) { $parts += "$rp post$(if ($rp -ne 1) { 's' })" }
+    $sub = if ([int]$o.approved) { "$($o.approved) more approved and waiting for their posting day" } else { 'Approve them on the manager before they go out.' }
+    Add $UI.Review (Row '#FFB547' (($parts -join ' and ') + ' to review') $sub (Pill 'To review' '#FFF6E5' '#9A5B00') $items ([Math]::Max(0, $rr + $rp - $items.Count)))
+    $UI.ReviewBtn.Visibility = 'Visible'
+  }
+}
+
+function Fill-Activity {
+  try { $tail = @(Get-Content $LogFile -Tail 30 -Encoding UTF8 -ErrorAction Stop) } catch { $tail = @() }
+  if (-not (Changed 'log' ($tail -join "`n"))) { return }
+  $UI.Activity.Children.Clear()
+  if (-not $tail.Count) { Add $UI.Activity (T 'Nothing yet.' 13.5 'Normal' $Muted); return }
+  [array]::Reverse($tail)
+  $n = 0
+  foreach ($line in $tail) {
+    if ($n -ge 18) { break }
+    if (-not $line.Trim()) { continue }
+    $time = ''; $msg = $line
+    if ($line -match '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+(.*)$') { $time = When ([datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null).ToString('o')); $msg = $Matches[2] }
+    $bad = $msg -match '(?i)problem|could not|failed|error'
+    $good = $msg -match '^(Done:|Reel #\d+ made|Made \d+ file|Uploaded)'
+    $d = New-Object System.Windows.Controls.DockPanel
+    $d.Margin = New-Object System.Windows.Thickness 0, 0, 0, 7
+    $tt = T $time 12.5 'Normal' $Muted; $tt.Width = 118; $tt.TextWrapping = 'NoWrap'
+    [System.Windows.Controls.DockPanel]::SetDock($tt, 'Left'); Add $d $tt
+    $mt = T $msg 13 $(if ($good) { 'SemiBold' } else { 'Normal' }) $(if ($bad) { '#9B1C1C' } elseif ($good) { '#1D6B3A' } else { '#1D2433' })
+    Add $d $mt
+    Add $UI.Activity $d
+    $n++
+  }
+}
+
+function Refresh-Window {
+  $sum = Summary
+  Fill-Status $sum
+  Fill-Parts
+  Fill-Queue
+  Fill-Activity
+  $UI.Foot.Text = 'True North Baptist Church ' + $Mid + ' this window updates by itself'
+}
+
+$LastAsk = [datetime]::MinValue
+function Show-Window {
+  $script:LastAsk = Get-Date; Ask-Overview
+  Refresh-Window
+  $wa = [System.Windows.SystemParameters]::WorkArea
+  if ($win.Height -gt $wa.Height - 20) { $win.Height = $wa.Height - 20 }
+  $win.Show(); $win.WindowState = 'Normal'; [void]$win.Activate()
+}
+$win.Add_Closing({ param($s, $e) $e.Cancel = $true; $win.Hide() })
+
+# ---------- actions ----------
+function Run-Now {
+  if (Is-Running) { [System.Windows.MessageBox]::Show('It is already working. It will pick up everything waiting before it stops.', 'Sermon Manager') | Out-Null; return }
+  try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop; $tray.ShowBalloonTip(3000, 'Sermon Manager', 'Starting now.', 'Info') }
+  catch { [System.Windows.MessageBox]::Show('Could not start it: ' + $_.Exception.Message, 'Sermon Manager') | Out-Null }
+}
+
+# Stop: ends all three parts and the programs they started (ffmpeg, yt-dlp), then tells the manager, which hands
+# any half-made sermon, reel or post straight back so the next run starts it again.
 function Stop-Run {
   if (-not (Is-Running)) { return }
-  $ok = [System.Windows.Forms.MessageBox]::Show('Stop what it is doing now? Anything half-made goes back on the list for the next run.', 'Sermon audio', 'YesNo', 'Question')
-  if ($ok -ne 'Yes') { return }
+  $ok = [System.Windows.MessageBox]::Show('Stop what it is doing now? Anything half-made goes back on the list for the next run.', 'Sermon Manager', 'YesNo', 'Question')
+  if ([string]$ok -ne 'Yes') { return }
   $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match 'sermon-audio\.ps1' })
   $ids = @($procs | ForEach-Object { [int]$_.ProcessId })
   $kids = @(Get-CimInstance Win32_Process | Where-Object { $ids -contains [int]$_.ParentProcessId })
@@ -185,98 +563,93 @@ function Stop-Run {
       if ($x.state -eq 'running') {
         $x.state = 'stopped'; $x.current = $null
         $x | Add-Member -NotePropertyName finishedAt -NotePropertyValue $now -Force
-        $x | Add-Member -NotePropertyName summary -NotePropertyValue 'stopped from the status icon' -Force
+        $x | Add-Member -NotePropertyName summary -NotePropertyValue 'stopped from the status window' -Force
         [IO.File]::WriteAllText($path, ($x | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
       }
     } catch {}
   }
   $msg = 'Stopped.'
   try {
-    $cfg = Get-Content (Join-Path $Dir 'config.json') -Raw | ConvertFrom-Json
-    $sec = $cfg.code | ConvertTo-SecureString
-    $code = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
-    $r = Invoke-RestMethod -Method Post -Uri ($cfg.server.TrimEnd('/') + '/api/pc/release') -Headers @{ Authorization = "Bearer $code" } -ContentType 'application/json' -Body '{}' -TimeoutSec 30
+    $r = Invoke-RestMethod -Method Post -Uri ($Server + '/api/pc/release') -Headers @{ Authorization = "Bearer $Code" } -ContentType 'application/json' -Body '{}' -TimeoutSec 30
     if ($r.released) { $msg = "Stopped. $($r.released) half-made item(s) went back on the list." }
   } catch { $msg = 'Stopped. (The manager could not be told; half-made items come back on their own within 30 minutes.)' }
-  try { [IO.File]::AppendAllText($LogFile, ('{0}  Stopped from the status icon. {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg) + "`r`n", (New-Object Text.UTF8Encoding($false))) } catch {}
-  $tray.ShowBalloonTip(4000, 'Sermon audio', $msg, 'Info')
+  try { [IO.File]::AppendAllText($LogFile, ('{0}  Stopped from the status window. {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg) + "`r`n", (New-Object Text.UTF8Encoding($false))) } catch {}
+  $tray.ShowBalloonTip(4000, 'Sermon Manager', $msg, 'Info')
+  $script:LastAsk = Get-Date; Ask-Overview
   Refresh-Window
 }
-
-function Refresh-Window {
-  $sum = Summary
-  $s = Read-Status
-  $head.Text = $sum.headline
-  $head.ForeColor = switch ($sum.kind) { 'working' { $Blue } 'ok' { $Green } 'problem' { $Orange } default { $Gray } }
-  $detail.Text = $sum.detail
-  $lines = @()
-  $v = if ($s -and $s.version) { "Version $($s.version)" } else { 'Version unknown' }
-  $nc = Next-Check
-  $lines += $v + $(if ($nc) { " - runs every hour, next at $nc" } else { ' - runs every hour while the computer is on' })
-  $hr = Read-Helper 'reels'; $hp = Read-Helper 'posts'
-  $made = [int]$(if ($s) { $s.reels } else { 0 }) + [int]$(if ($hr -and $s -and $hr.startedAt -ge $s.startedAt) { $hr.reels } else { 0 }) + [int]$(if ($hp -and $s -and $hp.startedAt -ge $s.startedAt) { $hp.reels } else { 0 })
-  if ($s -and $s.state -eq 'running') { $lines += "This run (started $(When $s.startedAt)): $($s.audio) sermon(s), $made reel(s) or post(s) so far" }
-  $lp = Last-Problem
-  if ($lp) { $lines += "Last problem ($(When $lp.lastProblemAt)): $($lp.lastProblem)" }
-  $info.Text = $lines -join "`r`n"
-  $runBtn.Enabled = $sum.kind -ne 'working'
-  $stopBtn.Enabled = $sum.kind -eq 'working'
-  try {
-    $tail = Get-Content $LogFile -Tail 40 -Encoding UTF8 -ErrorAction Stop
-    $text = ($tail | ForEach-Object { $_ }) -join "`r`n"
-    if ($log.Text -ne $text) { $log.Text = $text; $log.SelectionStart = $log.Text.Length; $log.ScrollToCaret() }
-  } catch { $log.Text = '(no log yet)' }
+function Hide-Today {
+  Set-Content -Path (Join-Path $Dir 'tray-off.txt') -Value (Get-Date -Format 'yyyy-MM-dd')
+  $tray.Visible = $false
+  $win.Hide()
+  [System.Windows.Forms.Application]::Exit()
 }
 
-function Show-Window { Refresh-Window; $form.Show(); $form.WindowState = 'Normal'; $form.Activate() }
+$UI.RunBtn.Add_Click({ Run-Now; Refresh-Window })
+$UI.StopBtn.Add_Click({ Stop-Run })
+$UI.ReviewBtn.Add_Click({ Start-Process ($Manager + '/review') })
+$UI.ManagerBtn.Add_Click({ Start-Process $Manager })
+$UI.LogLink.Add_MouseLeftButtonUp({ Start-Process notepad.exe $LogFile })
+$UI.HideLink.Add_MouseLeftButtonUp({ Hide-Today })
 
 # ---------- the icon ----------
 $tray = New-Object System.Windows.Forms.NotifyIcon
 $tray.Icon = $Icons.unknown
-$tray.Text = 'Sermon audio'
+$tray.Text = 'Sermon Manager'
 $tray.Visible = $true
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
-[void]$menu.Items.Add('Show status', $null, { Show-Window })
+[void]$menu.Items.Add('Open the Sermon Manager window', $null, { Show-Window })
 [void]$menu.Items.Add('Run now', $null, { Run-Now })
 [void]$menu.Items.Add('Stop this run', $null, { Stop-Run })
-[void]$menu.Items.Add('Open full log', $null, { Start-Process notepad.exe $LogFile })
+[void]$menu.Items.Add('Review reels and posts', $null, { Start-Process ($Manager + '/review') })
 [void]$menu.Items.Add('Manager page', $null, { Start-Process $Manager })
+[void]$menu.Items.Add('Open full log', $null, { Start-Process notepad.exe $LogFile })
 [void]$menu.Items.Add('-')
-[void]$menu.Items.Add('Hide until tomorrow', $null, {
-    Set-Content -Path (Join-Path $Dir 'tray-off.txt') -Value (Get-Date -Format 'yyyy-MM-dd')
-    $tray.Visible = $false
-    [System.Windows.Forms.Application]::Exit()
-  })
+[void]$menu.Items.Add('Hide the icon until tomorrow', $null, { Hide-Today })
 $tray.ContextMenuStrip = $menu
 $tray.Add_MouseClick({ param($s, $e) if ($e.Button -eq 'Left') { Show-Window } })
 
 $lastKind = ''
 function Tick {
-  # a newer copy of this file was installed: start it and leave
+  # a newer copy of this file was installed: start it (showing the window again if it was open) and leave
   try {
     if ((Get-Item $Me).LastWriteTime -ne $myStamp) {
       $tray.Visible = $false
       $trayMutex.ReleaseMutex()
-      Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-STA', '-File', "`"$Me`"") -WindowStyle Hidden
+      $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-STA', '-File', "`"$Me`"")
+      if ($win.IsVisible) { $a += '-Show' }
+      Start-Process powershell.exe -ArgumentList $a -WindowStyle Hidden
       [System.Windows.Forms.Application]::Exit()
       return
     }
   } catch {}
   $sum = Summary
   $tray.Icon = $Icons[$sum.kind]
-  $tip = 'Sermon audio: ' + $sum.headline
-  if ($sum.kind -eq 'working' -and $sum.detail) { $tip += ' - ' + ($sum.detail -replace "`r`n", ' / ') }
+  $tip = 'Sermon Manager: ' + $sum.headline
   if ($tip.Length -gt 63) { $tip = $tip.Substring(0, 60) + '...' }
   $tray.Text = $tip
-  if ($script:lastKind -eq 'working' -and $sum.kind -eq 'problem') { $tray.ShowBalloonTip(5000, 'Sermon audio', $sum.detail, 'Warning') }
+  if ($script:lastKind -eq 'working' -and $sum.kind -eq 'problem') { $tray.ShowBalloonTip(5000, 'Sermon Manager', $sum.detail, 'Warning') }
   $script:lastKind = $sum.kind
-  if ($form.Visible) { Refresh-Window }
+  if ($win.IsVisible) {
+    if (((Get-Date) - $script:LastAsk).TotalSeconds -ge 60) { $script:LastAsk = Get-Date; Ask-Overview }
+    Refresh-Window
+  }
 }
+# a short timer: shortcut clicks and the manager's answer show up at once
+$fast = New-Object System.Windows.Forms.Timer
+$fast.Interval = 400
+$fast.Add_Tick({
+    if ($showEvent.WaitOne(0)) { Show-Window }
+    if ((Take-Overview) -and $win.IsVisible) { Fill-Queue }
+  })
+$fast.Start()
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 3000
 $timer.Add_Tick({ Tick })
 $timer.Start()
+Ensure-Shortcuts
 Tick
+if ($Show) { Show-Window }
 
 [System.Windows.Forms.Application]::Run()
 $tray.Visible = $false
