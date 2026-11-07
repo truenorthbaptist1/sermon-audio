@@ -389,8 +389,8 @@ function Row([string]$dot, [string]$title, [string]$text, $pill, [string[]]$item
 }
 
 # ---------- filling it in ----------
-$Sig = @{}
-function Changed([string]$key, [string]$value) { if ($Sig[$key] -eq $value) { return $false }; $Sig[$key] = $value; return $true }
+$Seen = @{}
+function Changed([string]$key, [string]$value) { if ($script:Seen[$key] -eq $value) { return $false }; $script:Seen[$key] = $value; return $true }
 
 function Fill-Status($sum) {
   $k = $Kinds[$sum.kind]
