@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.2'
+$Version = '1.9.3'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -46,7 +46,9 @@ function Log([string]$m) {
 # the audio part writes status.json; the helpers write status-reels.json and status-posts.json
 $StatusFile = if ($Part -eq 'audio') { Join-Path $Dir 'status.json' } else { Join-Path $Dir "status-$Part.json" }
 $St = @{ version = $Version; part = $Part; state = 'running'; startedAt = (Get-Date -Format o); current = 'Starting'; audio = 0; reels = 0 }
-try { $old = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json; if ($old.lastProblem) { $St.lastProblem = $old.lastProblem; $St.lastProblemAt = $old.lastProblemAt } } catch {}
+try { $old = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json; if ($old.lastProblem) { $St.lastProblem = $old.lastProblem; $St.lastProblemAt = $old.lastProblemAt; if ($old.lastProblemFixedAt) { $St.lastProblemFixedAt = $old.lastProblemFixedAt } } } catch {}
+# 1.9.3: the internet being down (not YouTube, not the program) - the window explains it in plain words
+$NoInternet = 'getaddrinfo failed|Failed to resolve|could not be resolved|No such host is known|Name or service not known|Temporary failure in name resolution|Unable to connect to the remote server|Network is unreachable|No connection could be made|No route to host'
 function Save-Status {
   try {
     $tmp = $StatusFile + '.tmp'
@@ -54,15 +56,17 @@ function Save-Status {
     Move-Item -Path $tmp -Destination $StatusFile -Force
   } catch {}
 }
+# something worked after the last problem: the window then says it is working again
+function Problem-Fixed { if ($St.lastProblemAt -and -not $St.lastProblemFixedAt) { $St.lastProblemFixedAt = (Get-Date -Format o) } }
 function Status-FromLog([string]$m) {
   $t = $m.Trim()
   if ($t -match '^Working on: (.+)$') { $St.current = 'Making audio: ' + $Matches[1] }
   elseif ($t -match '^Reels: getting captions for (.+)$') { $St.current = 'Getting captions: ' + $Matches[1] }
   elseif ($t -match '^Reels: making reel #(\d+) from (.+)$') { $St.current = "Making reel #$($Matches[1]): $($Matches[2])" }
   elseif ($t -match '^Posts: making the (.+)$') { $St.current = 'Making the ' + $Matches[1] }
-  elseif ($t -match '^Done: ') { $St.audio++ }
-  elseif ($t -match '^Reel #\d+ made|^Made \d+ file') { $St.reels++ }
-  elseif ($t -match '^(Problem|Reel problem)[^:]*: (.+)$|^Could not ask|doesn.t accept this computer') { $St.lastProblem = $t; $St.lastProblemAt = (Get-Date -Format o) }
+  elseif ($t -match '^Done: ') { $St.audio++; Problem-Fixed }
+  elseif ($t -match '^Reel #\d+ made|^Made \d+ file') { $St.reels++; Problem-Fixed }
+  elseif ($t -match '^(Problem|Reel problem)[^:]*: (.+)$|^Could not ask|doesn.t accept this computer') { $St.lastProblem = $t; $St.lastProblemAt = (Get-Date -Format o); $St.Remove('lastProblemFixedAt') }
   else { return }
   Save-Status
 }
@@ -805,7 +809,9 @@ for ($n = 0; $n -lt $limit; $n++) {
   } catch {
     $msg = if ($stage -eq 'upload') { ApiError $_ } else { $_.Exception.Message }
     Log "  Problem ($stage): $msg"
-    try { Api '/api/audio/fail' @{ id = $job.id; error = "$stage`: $msg" } | Out-Null } catch {}
+    # 1.9.3: no internet isn't this sermon's fault, so it doesn't count as one of its tries
+    if ($msg -match $NoInternet) { $stopAfter = $true }
+    else { try { Api '/api/audio/fail' @{ id = $job.id; error = "$stage`: $msg" } | Out-Null } catch {} }
     if ($stopAfter) { Log '  Stopping for now; will try again next hour.'; break }
   } finally {
     if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }

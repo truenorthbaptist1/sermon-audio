@@ -10,7 +10,7 @@
 # Keep this file plain ASCII: Windows PowerShell 5.1 reads scripts without a BOM as ANSI. Special characters are
 # made with [char] codes or XML entities.
 #
-# TrayVersion 2.0.0
+# TrayVersion 2.1.0
 param([switch]$Show)
 
 $ErrorActionPreference = 'Continue'
@@ -62,6 +62,42 @@ function Last-Problem {
   return $best
 }
 
+# 2.1.0: say in plain words what a problem means. Returns @{ kind = internet|youtube|video|disk|other; head; text }
+function Explain-Problem([string]$raw) {
+  $r = [string]$raw
+  $where = if ($r -match '^Could not ask|\(upload\)|workers\.dev') { 'the online manager' } elseif ($r -match 'youtube') { 'YouTube' } elseif ($r -match 'instagram|facebook|graph\.') { 'Instagram/Facebook' } else { 'the internet' }
+  $job = if ($r -match '^Reel') { 'make the reel' } elseif ($r -match '\(upload\)') { 'send the finished sermon audio' } elseif ($r -match '^Could not ask') { 'ask what to work on next' } else { 'download the sermon video' }
+  if ($r -match 'getaddrinfo failed|Failed to resolve|could not be resolved|No such host is known|Name or service not known|Temporary failure in name resolution|Unable to connect to the remote server|Network is unreachable|No connection could be made|No route to host') {
+    return @{ kind = 'internet'; head = 'The internet was down'
+      text = "This computer couldn't connect to $where, so it couldn't $job. That means the Wi-Fi or internet connection dropped. Nothing is wrong with the program or the sermon: it stopped for now and tries again at its next hourly check." }
+  }
+  if ($r -match 'timed out|forcibly closed|connection was closed|Connection reset|ConnectionResetError|Read timed out') {
+    return @{ kind = 'internet'; head = 'The internet connection was too slow or cut out'
+      text = "The connection to $where stopped partway through, so it couldn't $job. Usually the Wi-Fi was weak or dropped for a moment. It tries again at its next hourly check." }
+  }
+  if ($r -match 'confirm you.re not a bot|Sign in to confirm') {
+    return @{ kind = 'youtube'; head = 'YouTube is blocking downloads for now'
+      text = "YouTube asked this computer to prove it isn't a robot, so it stopped downloading. This usually clears up by itself within a day. If it keeps happening, lower 'Past sermons a day' on the manager page." }
+  }
+  if ($r -match 'HTTP Error 429|Too Many Requests') {
+    return @{ kind = 'youtube'; head = 'YouTube is slowing down downloads'
+      text = "YouTube said this computer was downloading too much too fast, so it stopped for now. It tries again at its next hourly check. If it keeps happening, lower 'Past sermons a day' on the manager page." }
+  }
+  if ($r -match 'Private video|Video unavailable|has been removed|This video is not available|members-only') {
+    return @{ kind = 'video'; head = "That video can't be downloaded"
+      text = "YouTube says this video is private, members-only or was removed, so there's nothing to download. Make it public on YouTube if it should have audio; otherwise it's skipped after a few tries." }
+  }
+  if ($r -match 'No space left|not enough space|disk is full|There is not enough space') {
+    return @{ kind = 'disk'; head = "This computer's drive is full"
+      text = "There isn't enough free space on this computer to work on the sermon. Free up some space (empty the Recycle Bin, delete old downloads), and it carries on at its next hourly check." }
+  }
+  if ($r -match 'Converting to MP3 failed') {
+    return @{ kind = 'other'; head = "Couldn't make the MP3"
+      text = "The video downloaded, but turning it into an MP3 didn't work. It tries this sermon again later. Details: $r" }
+  }
+  return @{ kind = 'other'; head = 'Last problem'; text = $r }
+}
+
 function When([string]$iso) {
   if (-not $iso) { return '' }
   try {
@@ -94,7 +130,7 @@ function Part-State([string]$part) {
 function Summary {
   $s = Read-Status
   $lp = Last-Problem
-  $problemRecent = $lp -and ([datetime]::Parse($lp.lastProblemAt) -gt (Get-Date).AddHours(-3))
+  $problemRecent = $lp -and -not $lp.lastProblemFixedAt -and ([datetime]::Parse($lp.lastProblemAt) -gt (Get-Date).AddHours(-3))
   if (Is-Running) {
     $busy = @(@('audio', 'reels', 'posts') | Where-Object { (Part-State $_).state -eq 'working' })
     $what = if ($busy.Count) { 'Busy with: ' + (($busy | ForEach-Object { @{ audio = 'sermon audio'; reels = 'reels'; posts = 'posts and Facebook videos' }[$_] }) -join ', ') } else { 'Checking for work' }
@@ -104,7 +140,11 @@ function Summary {
   $ended = if ($s.finishedAt) { $s.finishedAt } else { (Get-Item $StatusFile).LastWriteTime.ToString('o') }
   $line = 'Last run ended ' + (When $ended)
   if ($s.summary) { $line += ': ' + $s.summary }
-  if ($problemRecent) { return @{ kind = 'problem'; headline = 'Idle, but there was a problem'; detail = $line } }
+  if ($problemRecent) {
+    $ex = Explain-Problem ([string]$lp.lastProblem)
+    if ($ex.kind -eq 'internet') { return @{ kind = 'problem'; headline = 'Idle: the internet was down'; detail = $line } }
+    return @{ kind = 'problem'; headline = 'Idle, but there was a problem'; detail = $line }
+  }
   return @{ kind = 'ok'; headline = 'Idle, all good'; detail = $line }
 }
 
@@ -406,9 +446,22 @@ function Fill-Status($sum) {
   $UI.StopBtn.IsEnabled = $sum.kind -eq 'working'
   $lp = Last-Problem
   if ($lp -and ([datetime]::Parse($lp.lastProblemAt) -gt (Get-Date).AddHours(-24))) {
+    $ex = Explain-Problem ([string]$lp.lastProblem)
     $UI.ProblemCard.Visibility = 'Visible'
-    $UI.ProblemHead.Text = 'Last problem ' + $Mid + ' ' + (When $lp.lastProblemAt)
-    $UI.ProblemText.Text = [string]$lp.lastProblem
+    $head = $ex.head + ' ' + $Mid + ' ' + (When $lp.lastProblemAt)
+    $text = $ex.text
+    if ($lp.lastProblemFixedAt) {
+      # something worked after it: say so, in green
+      $ink = '#1E6B3A'; $bg = '#E9F6EE'
+      $head += ' ' + $Mid + ' working again since ' + (When $lp.lastProblemFixedAt)
+      $text += ' It has worked fine since then, so there is nothing to do.'
+    } elseif ($ex.kind -eq 'internet') { $ink = '#8A5A00'; $bg = '#FFF5E0' }
+    else { $ink = '#9B1C1C'; $bg = '#FDECEC' }
+    $UI.ProblemCard.Background = B $bg; $UI.ProblemCard.BorderBrush = B $ink; $UI.ProblemHead.Foreground = B $ink
+    $UI.ProblemHead.Text = $head
+    $UI.ProblemText.Text = $text
+    # the exact error stays one hover away (for Claude or anyone fixing it)
+    $UI.ProblemCard.ToolTip = if ($ex.kind -ne 'other') { 'Exact error: ' + [string]$lp.lastProblem } else { $null }
   } else { $UI.ProblemCard.Visibility = 'Collapsed' }
 }
 
