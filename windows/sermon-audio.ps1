@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.4'
+$Version = '1.9.5'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -47,6 +47,7 @@ function Log([string]$m) {
 $StatusFile = if ($Part -eq 'audio') { Join-Path $Dir 'status.json' } else { Join-Path $Dir "status-$Part.json" }
 $St = @{ version = $Version; part = $Part; state = 'running'; startedAt = (Get-Date -Format o); current = 'Starting'; audio = 0; reels = 0 }
 try { $old = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json; if ($old.lastProblem) { $St.lastProblem = $old.lastProblem; $St.lastProblemAt = $old.lastProblemAt; if ($old.lastProblemFixedAt) { $St.lastProblemFixedAt = $old.lastProblemFixedAt } } } catch {}
+# 1.9.5: the full Facebook video reports its progress (download, editing, upload, Facebook processing) to the manager
 # 1.9.4: each reel/post/Facebook job works in its own temp folder (a reel and the Facebook video of the same sermon shared one and fought over src.mp4)
 # 1.9.3: the internet being down (not YouTube, not the program) - the window explains it in plain words
 $NoInternet = 'getaddrinfo failed|Failed to resolve|could not be resolved|No such host is known|Name or service not known|Temporary failure in name resolution|Unable to connect to the remote server|Network is unreachable|No connection could be made|No route to host'
@@ -136,6 +137,29 @@ function Run-Tool([string]$exe, [string[]]$argList, [string]$cwd = '') {
   try { $p.PriorityClass = 'BelowNormal' } catch {}
   $o = $p.StandardOutput.ReadToEndAsync()
   $e = $p.StandardError.ReadToEndAsync()
+  $p.WaitForExit()
+  return @{ code = $p.ExitCode; out = $o.Result; err = $e.Result }
+}
+
+# 1.9.5: like Run-Tool, but runs $tick every 20 seconds while the tool works (progress reports)
+function Run-ToolWatch([string]$exe, [string[]]$argList, [string]$cwd, [scriptblock]$tick) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = Join-Path $Tools $exe
+  if ($cwd) { $psi.WorkingDirectory = $cwd }
+  $psi.Arguments = ($argList | ForEach-Object { Quote-Arg $_ }) -join ' '
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  [void]$p.Start()
+  try { $p.PriorityClass = 'BelowNormal' } catch {}
+  $o = $p.StandardOutput.ReadToEndAsync()
+  $e = $p.StandardError.ReadToEndAsync()
+  while (-not $p.WaitForExit(20000)) { try { & $tick } catch {} }
   $p.WaitForExit()
   return @{ code = $p.ExitCode; out = $o.Result; err = $e.Result }
 }
@@ -503,7 +527,17 @@ function Fb-Form($client, [string]$url, [hashtable]$fields, [byte[]]$chunk) {
   return $j
 }
 
+# 1.9.5: tell the manager how far along the Facebook video is (at most every 45 s, or when the stage changes)
+$script:FbLast = @{ at = [datetime]::MinValue; stage = '' }
+function FB-Progress([string]$id, [string]$stage, [double]$pct) {
+  if ($stage -eq $script:FbLast.stage -and ((Get-Date) - $script:FbLast.at).TotalSeconds -lt 45) { return }
+  $script:FbLast = @{ at = (Get-Date); stage = $stage }
+  try { Api '/api/fbvideo/progress' @{ id = $id; stage = $stage; pct = [Math]::Round($pct) } | Out-Null } catch {}
+}
+
 function FB-Video($job, [string]$work) {
+  $script:FbLast = @{ at = [datetime]::MinValue; stage = '' }
+  FB-Progress $job.id 'download' 1
   Prepare-Art $job $work
   [IO.File]::WriteAllText((Join-Path $work 'endcard.ass'), [string]$job.endcard, (New-Object Text.UTF8Encoding($false)))
 
@@ -512,9 +546,11 @@ function FB-Video($job, [string]$work) {
   if ($null -ne $job.start -and $job.end) { $dlArgs += @('--download-sections', ('*' + (Str ([double]$job.start)) + '-' + (Str ([double]$job.end))), '--force-keyframes-at-cuts') }
   $dlArgs += @('--merge-output-format', 'mp4', '--no-playlist', '--no-progress', '--no-part', '--retries', '20', '--fragment-retries', '20',
     '--socket-timeout', '30', '-o', (Join-Path $work 'src.%(ext)s'), ('https://www.youtube.com/watch?v=' + $job.id))
-  $dl = Run-Tool 'yt-dlp.exe' $dlArgs
+  $fbId = [string]$job.id
+  $dl = Run-ToolWatch 'yt-dlp.exe' $dlArgs '' { FB-Progress $fbId 'download' 5 }
   $src = Get-ChildItem -Path $work -Filter 'src.*' | Select-Object -First 1
   if ($dl.code -ne 0 -or -not $src) { throw ('YouTube download failed: ' + (Last-Line $dl.err)) }
+  FB-Progress $fbId 'encode' 10
 
   $dur = 0.0
   $probe = Run-Tool 'ffprobe.exe' @('-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', $src.FullName)
@@ -544,10 +580,22 @@ function FB-Video($job, [string]$work) {
   } else {
     $filter += "[m][ma][e][3:a]concat=n=2:v=1:a=1[v][a]"
   }
-  $enc = Run-Tool 'ffmpeg.exe' ($inputs + @(
+  # editing runs from 10% to 65%, from ffmpeg's own progress file
+  $progFile = Join-Path $work 'progress.txt'
+  $total = $dur + 6 + $(if ($hasThumb) { 4 } else { 0 })
+  $enc = Run-ToolWatch 'ffmpeg.exe' ($inputs + @(
     '-filter_complex', $filter, '-map', '[v]', '-map', '[a]',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-profile:v', 'high', '-level', '4.1',
-    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', 'fb.mp4')) $work
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-movflags', '+faststart', '-progress', 'progress.txt', 'fb.mp4')) $work {
+      $t = 0.0
+      try {
+        $fsr = New-Object IO.FileStream($progFile, 'Open', 'Read', 'ReadWrite')
+        try { $txt = (New-Object IO.StreamReader($fsr)).ReadToEnd() } finally { $fsr.Close() }
+        $m = [regex]::Matches($txt, 'out_time_us=(\d+)')
+        if ($m.Count) { $t = [double]$m[$m.Count - 1].Groups[1].Value / 1e6 }
+      } catch {}
+      FB-Progress $fbId 'encode' (10 + 55 * [Math]::Min(1, $t / [Math]::Max(1, $total)))
+    }
   $out = Join-Path $work 'fb.mp4'
   if ($enc.code -ne 0 -or -not (Test-Path $out) -or (Get-Item $out).Length -lt 100000) { throw ('Making the video failed: ' + (Last-Line $enc.err)) }
   $size = (Get-Item $out).Length
@@ -562,6 +610,7 @@ function FB-Video($job, [string]$work) {
   $url = "$videoHost/$($job.page.api)/$($job.page.id)/videos"
   $tok = [string]$job.page.token
   try {
+    FB-Progress $fbId 'upload' 65
     $st = Fb-Form $client $url @{ access_token = $tok; upload_phase = 'start'; file_size = [string]$size } $null
     $session = [string]$st.upload_session_id; $videoId = [string]$st.video_id
     $from = [long]$st.start_offset; $to = [long]$st.end_offset
@@ -576,10 +625,12 @@ function FB-Video($job, [string]$work) {
           catch { if ($try -ge 4) { throw }; Start-Sleep -Seconds (20 * $try) }
         }
         $from = [long]$tr.start_offset; $to = [long]$tr.end_offset
+        FB-Progress $fbId 'upload' (65 + 30 * $from / [Math]::Max(1, $size))
       }
     } finally { $fs.Close() }
     [void](Fb-Form $client $url @{ access_token = $tok; upload_phase = 'finish'; upload_session_id = $session
         title = [string]$job.fbTitle; description = [string]$job.description; published = 'true' } $null)
+    FB-Progress $fbId 'processing' 96
     # the series thumbnail as the cover (a cover problem never stops the post). 1.9.1: Facebook ignores a cover
     # sent while it is still processing the video, so wait until the video is ready (up to 20 minutes), then try
     # up to 3 times.
@@ -591,6 +642,7 @@ function FB-Video($job, [string]$work) {
           $vs = [string]$sj.status.video_status
           if ($vs -eq 'ready' -or $vs -eq 'error') { break }
         } catch {}
+        FB-Progress $fbId 'processing' 97
         Start-Sleep -Seconds 30
       }
       for ($c = 1; $c -le 3; $c++) {

@@ -1,0 +1,33 @@
+name: PowerShell check
+on:
+  push:
+    paths: ['windows/**', '.github/workflows/ps-check.yml']
+jobs:
+  parse:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse every script with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $bad = 0
+          Get-ChildItem windows -Filter *.ps1 | ForEach-Object {
+            $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e)
+            foreach ($x in $e) { Write-Host "$($_.Name):$($x.Extent.StartLineNumber): $($x.Message)"; $bad++ }
+          }
+          if ($bad) { exit 1 }
+          Write-Host 'All scripts parse.'
+      - name: Run-ToolWatch calls its tick while a tool runs
+        shell: powershell
+        run: |
+          $Tools = 'C:\Windows\System32'
+          $src = Get-Content windows\sermon-audio.ps1 -Raw
+          $q = [regex]::Match($src, '(?s)function Quote-Arg.*?\n}\r?\n').Value
+          $w = [regex]::Match($src, '(?s)function Run-ToolWatch.*?\n}\r?\n').Value
+          if (-not $w) { throw 'Run-ToolWatch not found' }
+          Invoke-Expression $q; Invoke-Expression $w
+          $n = 0; $outer = 'seen'
+          $r = Run-ToolWatch 'PING.EXE' @('-n', '45', '127.0.0.1') '' { $script:n++; if ($outer -ne 'seen') { throw 'scope' } }
+          Write-Host "exit $($r.code), ticks $n"
+          if ($r.code -ne 0 -or $n -lt 1) { exit 1 }
