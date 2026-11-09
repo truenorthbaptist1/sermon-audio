@@ -27,10 +27,14 @@ jobs:
           $w = [regex]::Match($src, '(?s)function Run-ToolWatch.*?\n}\r?\n').Value
           if (-not $w) { throw 'Run-ToolWatch not found' }
           Invoke-Expression $q; Invoke-Expression $w
+          foreach ($f in 'Kill-Tree', 'Wait-Tool') { Invoke-Expression ([regex]::Match($src, "(?s)function $f.*?\n}\r?\n").Value) }
+          $script:beats = 0
+          function Save-Status { $script:beats++ }
           $n = 0; $outer = 'seen'
           $r = Run-ToolWatch 'PING.EXE' @('-n', '45', '127.0.0.1') '' { $script:n++; if ($outer -ne 'seen') { throw 'scope' } }
           Write-Host "exit $($r.code), ticks $n"
-          if ($r.code -ne 0 -or $n -lt 1) { exit 1 }
+          Write-Host "heartbeats $beats"
+          if ($r.code -ne 0 -or $n -lt 1 -or $beats -lt 1) { exit 1 }
       - name: A stuck part is found and stopped, and its mutex can be taken over (1.9.6)
         shell: powershell
         run: |
