@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.3'
+$Version = '1.9.4'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -47,6 +47,7 @@ function Log([string]$m) {
 $StatusFile = if ($Part -eq 'audio') { Join-Path $Dir 'status.json' } else { Join-Path $Dir "status-$Part.json" }
 $St = @{ version = $Version; part = $Part; state = 'running'; startedAt = (Get-Date -Format o); current = 'Starting'; audio = 0; reels = 0 }
 try { $old = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json; if ($old.lastProblem) { $St.lastProblem = $old.lastProblem; $St.lastProblemAt = $old.lastProblemAt; if ($old.lastProblemFixedAt) { $St.lastProblemFixedAt = $old.lastProblemFixedAt } } } catch {}
+# 1.9.4: each reel/post/Facebook job works in its own temp folder (a reel and the Facebook video of the same sermon shared one and fought over src.mp4)
 # 1.9.3: the internet being down (not YouTube, not the program) - the window explains it in plain words
 $NoInternet = 'getaddrinfo failed|Failed to resolve|could not be resolved|No such host is known|Name or service not known|Temporary failure in name resolution|Unable to connect to the remote server|Network is unreachable|No connection could be made|No route to host'
 function Save-Status {
@@ -624,7 +625,9 @@ function Reel-Work([string]$only) {
     if ($r.now) { $script:LastCheck = [double]$r.now }
     $job = $r.job
     if (-not $job) { break }
-    $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-reel-' + ($job.id -replace '[^\w-]', ''))
+    # each job gets its own folder: the reels and posts helpers can work on the same sermon at once (a reel and the
+    # full Facebook video), and a shared folder made one delete or overwrite the other's src.mp4
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('tnbc-' + $job.type + '-' + ($job.id -replace '[^\w-]', '') + $(if ($job.n) { '-' + $job.n } else { '' }) + '-' + $PID)
     try {
       if (Test-Path $work) { Remove-Item $work -Recurse -Force }
       New-Item -ItemType Directory -Path $work | Out-Null
