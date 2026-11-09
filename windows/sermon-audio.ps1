@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.5'
+$Version = '1.9.6'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -45,18 +45,27 @@ function Log([string]$m) {
 # ---------- status for the icon by the clock (status-tray.ps1 reads status.json) ----------
 # the audio part writes status.json; the helpers write status-reels.json and status-posts.json
 $StatusFile = if ($Part -eq 'audio') { Join-Path $Dir 'status.json' } else { Join-Path $Dir "status-$Part.json" }
-$St = @{ version = $Version; part = $Part; state = 'running'; startedAt = (Get-Date -Format o); current = 'Starting'; audio = 0; reels = 0 }
+$St = @{ version = $Version; part = $Part; state = 'running'; startedAt = (Get-Date -Format o); current = 'Starting'; audio = 0; reels = 0; pid = $PID }
 try { $old = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json; if ($old.lastProblem) { $St.lastProblem = $old.lastProblem; $St.lastProblemAt = $old.lastProblemAt; if ($old.lastProblemFixedAt) { $St.lastProblemFixedAt = $old.lastProblemFixedAt } } } catch {}
+# 1.9.6: never stuck again. A heartbeat (beat) in each status file every 30 s; a new run stops a part that has had no
+#        heartbeat for 45 minutes and hands its work back. yt-dlp/ffmpeg get time limits, yt-dlp a network timeout.
+#        Checks for a new version every run (was daily) and uses it straight away.
 # 1.9.5: the full Facebook video reports its progress (download, editing, upload, Facebook processing) to the manager
 # 1.9.4: each reel/post/Facebook job works in its own temp folder (a reel and the Facebook video of the same sermon shared one and fought over src.mp4)
 # 1.9.3: the internet being down (not YouTube, not the program) - the window explains it in plain words
 $NoInternet = 'getaddrinfo failed|Failed to resolve|could not be resolved|No such host is known|Name or service not known|Temporary failure in name resolution|Unable to connect to the remote server|Network is unreachable|No connection could be made|No route to host'
 function Save-Status {
+  $St.beat = (Get-Date -Format o)  # 1.9.6: proof of life; a part with no beat for 45 minutes is stuck
   try {
     $tmp = $StatusFile + '.tmp'
     [IO.File]::WriteAllText($tmp, ($St | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
     Move-Item -Path $tmp -Destination $StatusFile -Force
   } catch {}
+}
+# 1.9.6: stop a process and everything it started
+function Kill-Tree([int]$id) {
+  try { & taskkill.exe /T /F /PID $id 2>&1 | Out-Null } catch {}
+  try { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue } catch {}
 }
 # something worked after the last problem: the window then says it is working again
 function Problem-Fixed { if ($St.lastProblemAt -and -not $St.lastProblemFixedAt) { $St.lastProblemFixedAt = (Get-Date -Format o) } }
@@ -86,6 +95,27 @@ $mutex = New-Object System.Threading.Mutex($false, $mutexName)
 # a part stopped from the status icon leaves its mutex "abandoned": taking it over is fine
 $got = $false
 try { $got = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+# 1.9.6: is the copy that holds it actually working? No heartbeat for 45 minutes means it's stuck: stop it and carry on.
+function Stuck-Pid([string]$file) {
+  try {
+    $j = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not $j.pid -or $j.state -ne 'running') { return 0 }
+    $when = if ($j.beat) { [datetime]$j.beat } else { [datetime]$j.startedAt }
+    if (((Get-Date) - $when).TotalMinutes -lt 45) { return 0 }
+    $pr = Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue
+    if ($pr -and $pr.ProcessName -eq 'powershell') { return [int]$j.pid }
+  } catch {}
+  return 0
+}
+if (-not $got) {
+  $stuck = Stuck-Pid $StatusFile
+  if ($stuck) {
+    Log "The $Part part from an earlier run (process $stuck) had stopped responding; stopping it and carrying on."
+    Kill-Tree $stuck
+    Start-Sleep -Seconds 3
+    try { $got = $mutex.WaitOne(10000) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+  }
+}
 if (-not $got) { if ($Show) { Write-Host 'Already running.' }; exit 0 }
 function Main-Running {
   $m = $null
@@ -119,11 +149,24 @@ function Quote-Arg([string]$a) {
   return '"' + $e + '"'
 }
 
+# 1.9.6: wait for a tool with a heartbeat every 20 s and a time limit (3 hours: the longest real job, a full
+# sermon video, takes well under one), so a tool that hangs (often after the computer slept) can't hold things up
+function Wait-Tool($p, [string]$exe, $tick) {
+  $limit = (Get-Date).AddHours(3)
+  while (-not $p.WaitForExit(20000)) {
+    Save-Status
+    if ($tick) { try { & $tick } catch {} }
+    if ((Get-Date) -gt $limit) { Kill-Tree $p.Id; throw "$exe took over 3 hours and was stopped" }
+  }
+  $p.WaitForExit()
+}
+
 # Runs a tool, waits, and returns @{ code; out; err }  ($cwd: folder to run it in)
 function Run-Tool([string]$exe, [string[]]$argList, [string]$cwd = '') {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = Join-Path $Tools $exe
   if ($cwd) { $psi.WorkingDirectory = $cwd }
+  if ($exe -eq 'yt-dlp.exe' -and $argList -notcontains '--version' -and $argList -notcontains '-U') { $argList = @('--socket-timeout', '60') + $argList }  # 1.9.6
   $psi.Arguments = ($argList | ForEach-Object { Quote-Arg $_ }) -join ' '
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
@@ -137,7 +180,7 @@ function Run-Tool([string]$exe, [string[]]$argList, [string]$cwd = '') {
   try { $p.PriorityClass = 'BelowNormal' } catch {}
   $o = $p.StandardOutput.ReadToEndAsync()
   $e = $p.StandardError.ReadToEndAsync()
-  $p.WaitForExit()
+  Wait-Tool $p $exe $null
   return @{ code = $p.ExitCode; out = $o.Result; err = $e.Result }
 }
 
@@ -146,6 +189,7 @@ function Run-ToolWatch([string]$exe, [string[]]$argList, [string]$cwd, [scriptbl
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = Join-Path $Tools $exe
   if ($cwd) { $psi.WorkingDirectory = $cwd }
+  if ($exe -eq 'yt-dlp.exe' -and $argList -notcontains '--version' -and $argList -notcontains '-U') { $argList = @('--socket-timeout', '60') + $argList }  # 1.9.6
   $psi.Arguments = ($argList | ForEach-Object { Quote-Arg $_ }) -join ' '
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
@@ -159,8 +203,7 @@ function Run-ToolWatch([string]$exe, [string[]]$argList, [string]$cwd, [scriptbl
   try { $p.PriorityClass = 'BelowNormal' } catch {}
   $o = $p.StandardOutput.ReadToEndAsync()
   $e = $p.StandardError.ReadToEndAsync()
-  while (-not $p.WaitForExit(20000)) { try { & $tick } catch {} }
-  $p.WaitForExit()
+  Wait-Tool $p $exe $tick
   return @{ code = $p.ExitCode; out = $o.Result; err = $e.Result }
 }
 
@@ -293,9 +336,10 @@ function Start-Tray {
 }
 
 if ($Part -eq 'audio') {
-# ---------- keep this program up to date (checks once a day; new version runs next time) ----------
+# ---------- keep this program up to date (1.9.6: checks every run and switches to a new version at once) ----------
 $selfStamp = Join-Path $Dir 'last-self-update.txt'
-if (-not (Test-Path $selfStamp) -or ((Get-Date) - (Get-Item $selfStamp).LastWriteTime).TotalHours -ge 20) {
+$updatedTo = $null
+if ($true) {
   try {
     $newTmp = Join-Path $Dir 'sermon-audio.new.ps1'
     Invoke-WebRequest 'https://raw.githubusercontent.com/truenorthbaptist1/sermon-audio/main/windows/sermon-audio.ps1' -OutFile $newTmp -UseBasicParsing -TimeoutSec 60
@@ -303,12 +347,22 @@ if (-not (Test-Path $selfStamp) -or ((Get-Date) - (Get-Item $selfStamp).LastWrit
     $mine = $MyInvocation.MyCommand.Path
     if ($newText -match "Version = '([\d.]+)'" -and ([version]$Matches[1] -gt [version]$Version) -and $newText -match 'SermonAudioEnd') {
       Copy-Item $newTmp $mine -Force
-      Log "Program updated to version $($Matches[1]) (used from the next run)."
+      Log "Program updated to version $($Matches[1])."
+      $updatedTo = $Matches[1]
     }
     Remove-Item $newTmp -Force -ErrorAction SilentlyContinue
   } catch {}
   Update-Tray
   Set-Content -Path $selfStamp -Value (Get-Date -Format o)
+}
+if ($updatedTo) {
+  # run the new version now, in this same window (or hidden, as now), and stop this one
+  $St.state = 'done'; $St.current = $null; Save-Status
+  $mutex.ReleaseMutex()
+  $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Me)
+  if ($Show) { $a += '-Show' }
+  & powershell.exe @a
+  exit $LASTEXITCODE
 }
 Start-Tray
 
@@ -532,6 +586,7 @@ $script:FbLast = @{ at = [datetime]::MinValue; stage = '' }
 function FB-Progress([string]$id, [string]$stage, [double]$pct) {
   if ($stage -eq $script:FbLast.stage -and ((Get-Date) - $script:FbLast.at).TotalSeconds -lt 45) { return }
   $script:FbLast = @{ at = (Get-Date); stage = $stage }
+  Save-Status
   try { Api '/api/fbvideo/progress' @{ id = $id; stage = $stage; pct = [Math]::Round($pct) } | Out-Null } catch {}
 }
 
@@ -710,6 +765,7 @@ if ($Part -ne 'audio') {
   $until = (Get-Date).AddHours(12)
   while ((Get-Date) -lt $until -and (Main-Running)) {
     Start-Sleep -Seconds 60
+    Save-Status
     if ((Get-Date) -lt $script:PauseUntil) { continue }
     try { $pk = Api ('/api/reels/peek?part=' + $Part) @{} } catch { continue }
     if ([double]$pk.poke -gt $script:LastCheck) { Reel-Work $Part }
@@ -722,6 +778,25 @@ if ($Part -ne 'audio') {
 }
 
 # ---------- audio part: start the two helpers, so reels and posts are made at the same time as the audio ----------
+# 1.9.6: a helper left over from an earlier run that has stopped responding (no heartbeat for 45 minutes) is stopped,
+# and the work it held is handed back so it can be made again now
+$killed = $false
+foreach ($h in @('reels', 'posts')) {
+  $hm = New-Object System.Threading.Mutex($false, "$MainMutex-$h")
+  $free = $false
+  try { $free = $hm.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $free = $true }
+  if ($free) { $hm.ReleaseMutex() }
+  else {
+    $sp = Stuck-Pid (Join-Path $Dir "status-$h.json")
+    if ($sp) { Log "The $h helper from an earlier run (process $sp) had stopped responding; stopping it."; Kill-Tree $sp; $killed = $true }
+  }
+  $hm.Dispose()
+}
+if ($killed) {
+  Start-Sleep -Seconds 3
+  try { $rel = Api '/api/pc/release' @{}; Log "  Handed back $($rel.released) unfinished item(s) to make again." } catch {}
+}
+
 $helpersOk = $true
 foreach ($h in @('reels', 'posts')) {
   try {

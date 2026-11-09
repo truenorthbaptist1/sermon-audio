@@ -31,3 +31,27 @@ jobs:
           $r = Run-ToolWatch 'PING.EXE' @('-n', '45', '127.0.0.1') '' { $script:n++; if ($outer -ne 'seen') { throw 'scope' } }
           Write-Host "exit $($r.code), ticks $n"
           if ($r.code -ne 0 -or $n -lt 1) { exit 1 }
+      - name: A stuck part is found and stopped, and its mutex can be taken over (1.9.6)
+        shell: powershell
+        run: |
+          $src = Get-Content windows\sermon-audio.ps1 -Raw
+          foreach ($f in 'Kill-Tree', 'Stuck-Pid') { Invoke-Expression ([regex]::Match($src, "(?s)function $f.*?\n}\r?\n").Value) }
+          $dir = Join-Path $env:TEMP 'tnbc-test'; New-Item -ItemType Directory -Force $dir | Out-Null
+          # a "stuck helper": holds the posts mutex and sleeps
+          $holder = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -Command "$m = New-Object System.Threading.Mutex($false, ''Local\TNBCSermonAudio-posts''); [void]$m.WaitOne(0); Start-Sleep 600"'
+          Start-Sleep 4
+          $file = Join-Path $dir 'status-posts.json'
+          @{ pid = $holder.Id; state = 'running'; beat = (Get-Date).AddHours(-2).ToString('o'); startedAt = (Get-Date).AddHours(-3).ToString('o') } | ConvertTo-Json | Set-Content $file
+          $m = New-Object System.Threading.Mutex($false, 'Local\TNBCSermonAudio-posts')
+          $free = $false; try { $free = $m.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $free = $true }
+          if ($free) { throw 'the test holder did not get the mutex' }
+          $sp = Stuck-Pid $file
+          if ($sp -ne $holder.Id) { throw "Stuck-Pid gave $sp, expected $($holder.Id)" }
+          # a fresh heartbeat is not stuck
+          @{ pid = $holder.Id; state = 'running'; beat = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content (Join-Path $dir 'fresh.json')
+          if ((Stuck-Pid (Join-Path $dir 'fresh.json')) -ne 0) { throw 'a fresh heartbeat was called stuck' }
+          Kill-Tree $sp
+          Start-Sleep 3
+          $got = $false; try { $got = $m.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+          if (-not $got) { throw 'could not take the mutex over after stopping the stuck part' }
+          Write-Host 'Stuck part found, stopped, mutex taken over; fresh heartbeat left alone.'
