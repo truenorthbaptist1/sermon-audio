@@ -66,7 +66,7 @@ jobs:
           foreach ($f in 'Kill-Tree', 'Stuck-Pid') { Invoke-Expression ([regex]::Match($src, "(?s)function $f.*?\n}\r?\n").Value) }
           $dir = Join-Path $env:TEMP 'tnbc-old'; New-Item -ItemType Directory -Force $dir | Out-Null
           $fake = Join-Path $dir 'sermon-audio.ps1'
-          Set-Content $fake 'param([string]$Part) $m = New-Object System.Threading.Mutex($false, "Local\TNBCSermonAudio-posts"); [void]$m.WaitOne(0); Start-Sleep 600'
+          Set-Content $fake 'param([string]$Part) $m = New-Object System.Threading.Mutex($false, "Local\TNBCSermonAudio-$Part"); [void]$m.WaitOne(0); Start-Sleep 600'
           $old = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$fake`" -Part posts"
           $reels = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$fake`" -Part reels"
           Start-Sleep 4
