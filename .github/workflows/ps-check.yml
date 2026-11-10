@@ -101,13 +101,12 @@ jobs:
           if ($r.pct -ne 34 -or $r.text -notmatch 'Editing the video - 34%') { throw 'local progress not shown' }
           # from the manager (older helper, no fb in its file)
           function Read-Part($p) { [pscustomobject]@{ current = 'Checking for posts' } }
-          function Read-Part($p) { [pscustomobject]@{ current = 'Facebook video: DNA 14' } }
-          $script:Overview = '{"facebook":{"progress":[{"stage":"upload","pct":72}]}}' | ConvertFrom-Json
+          $script:Overview = '{"facebook":{"progress":[{"title":"DNA 14","stage":"upload","pct":72}]}}' | ConvertFrom-Json
           $r = Part-State 'posts'
           Write-Host $r.text
           if ($r.pct -ne 72 -or $r.text -notmatch 'Uploading to Facebook - 72%') { throw 'manager progress not shown' }
           # no progress anywhere: plain text, no bar value
           $script:Overview = $null
           $r = Part-State 'posts'
-          if ($null -ne $r.pct) { throw 'a bar value appeared with no progress' }
+          if ($null -ne $r.pct -or $r.state -ne 'watching') { throw 'a bar appeared with no progress, or the idle helper was not shown as waiting' }
           Write-Host 'Facebook progress shown in the status window.'

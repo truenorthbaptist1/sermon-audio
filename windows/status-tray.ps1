@@ -119,19 +119,19 @@ function Part-State([string]$part) {
   $s = Read-Part $part
   if (Part-Running $MutexOf[$part]) {
     $cur = if ($s -and $s.current) { [string]$s.current } else { 'Starting' }
-    if ($cur -match '^(Watching for new|Checking for) ') { return @{ state = 'watching'; text = 'Waiting for new work (it looks once a minute)' } }
-    if ($cur -eq 'Starting') { return @{ state = 'working'; text = 'Starting' } }
     # 2.2.0: the full Facebook video's progress, like the bar on the manager (program 1.9.8+ writes it)
-    $fb = if ($s.fb -and $s.fb.stage) { @{ stage = [string]$s.fb.stage; pct = [int]$s.fb.pct } } else { $null }
+    $fb = if ($s -and $s.fb -and $s.fb.stage) { @{ stage = [string]$s.fb.stage; pct = [int]$s.fb.pct } } else { $null }
     # a helper from before 1.9.8 doesn't write it: use the manager's figures (the window asks once a minute)
     if (-not $fb -and $part -eq 'posts' -and $script:Overview -and $script:Overview.facebook.progress) {
       $op = @($script:Overview.facebook.progress)[0]
-      if ($op -and $op.stage) { $fb = @{ stage = [string]$op.stage; pct = [int]$op.pct } }
+      if ($op -and $op.stage) { $fb = @{ stage = [string]$op.stage; pct = [int]$op.pct }; if ($cur -notmatch '^Facebook video') { $cur = 'Facebook video: ' + [string]$op.title } }
     }
     if ($fb) {
       $label = if ($FbStages[$fb.stage]) { $FbStages[$fb.stage] } else { $fb.stage }
       return @{ state = 'working'; text = $cur + ' ' + $Mid + ' ' + $label + ' ' + $Mid + ' ' + $fb.pct + '%'; pct = $fb.pct }
     }
+    if ($cur -match '^(Watching for new|Checking for) ') { return @{ state = 'watching'; text = 'Waiting for new work (it looks once a minute)' } }
+    if ($cur -eq 'Starting') { return @{ state = 'working'; text = 'Starting' } }
     return @{ state = 'working'; text = $cur }
   }
   if ($s -and $s.finishedAt) { return @{ state = 'idle'; text = 'Not running ' + $Mid + ' last finished ' + (When $s.finishedAt) } }
