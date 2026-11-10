@@ -59,3 +59,29 @@ jobs:
           $got = $false; try { $got = $m.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $got = $true }
           if (-not $got) { throw 'could not take the mutex over after stopping the stuck part' }
           Write-Host 'Stuck part found, stopped, mutex taken over; fresh heartbeat left alone.'
+      - name: A stuck part from 1.9.5 or older (no pid in its status file) is found by its command line (1.9.7)
+        shell: powershell
+        run: |
+          $src = Get-Content windows\sermon-audio.ps1 -Raw
+          foreach ($f in 'Kill-Tree', 'Stuck-Pid') { Invoke-Expression ([regex]::Match($src, "(?s)function $f.*?\n}\r?\n").Value) }
+          $dir = Join-Path $env:TEMP 'tnbc-old'; New-Item -ItemType Directory -Force $dir | Out-Null
+          $fake = Join-Path $dir 'sermon-audio.ps1'
+          Set-Content $fake 'param([string]$Part) $m = New-Object System.Threading.Mutex($false, "Local\TNBCSermonAudio-posts"); [void]$m.WaitOne(0); Start-Sleep 600'
+          $old = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$fake`" -Part posts"
+          $reels = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$fake`" -Part reels"
+          Start-Sleep 4
+          $file = Join-Path $dir 'status-posts.json'
+          @{ state = 'running'; startedAt = (Get-Date).AddHours(-3).ToString('o') } | ConvertTo-Json | Set-Content $file
+          # recently written: not stuck yet
+          if ((Stuck-Pid $file) -ne 0) { throw 'a recently written old status file was called stuck' }
+          (Get-Item $file).LastWriteTime = (Get-Date).AddHours(-2)
+          $sp = Stuck-Pid $file
+          if ($sp -ne $old.Id) { throw "Stuck-Pid gave $sp, expected the posts helper $($old.Id) (reels is $($reels.Id))" }
+          Kill-Tree $sp; Start-Sleep 3
+          if (Get-Process -Id $old.Id -ErrorAction SilentlyContinue) { throw 'the old helper is still running' }
+          if (-not (Get-Process -Id $reels.Id -ErrorAction SilentlyContinue)) { throw 'the reels helper was stopped too' }
+          $m = New-Object System.Threading.Mutex($false, 'Local\TNBCSermonAudio-posts')
+          $got = $false; try { $got = $m.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+          if (-not $got) { throw 'could not take the mutex over' }
+          Kill-Tree $reels.Id
+          Write-Host 'Old-style stuck posts helper found by command line and stopped; the reels helper left alone.'

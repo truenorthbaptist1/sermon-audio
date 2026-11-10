@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.6'
+$Version = '1.9.7'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -99,7 +99,20 @@ try { $got = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException
 function Stuck-Pid([string]$file) {
   try {
     $j = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
-    if (-not $j.pid -or $j.state -ne 'running') { return 0 }
+    if ($j.state -ne 'running') { return 0 }
+    # 1.9.7: a part started by 1.9.5 or older has no pid or heartbeat in its status file. If that file hasn't
+    # changed for 90 minutes (those versions write it at least once a minute while they wait), find the old
+    # part by its command line instead.
+    if (-not $j.pid) {
+      if (((Get-Date) - (Get-Item $file).LastWriteTime).TotalMinutes -lt 90) { return 0 }
+      $part = if ($file -match 'status-(reels|posts)\.json$') { $Matches[1] } else { 'audio' }
+      foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue)) {
+        if ($p.ProcessId -eq $PID -or $p.CommandLine -notmatch 'sermon-audio\.ps1') { continue }
+        $hasPart = $p.CommandLine -match '-Part\s+(reels|posts)'
+        if (($part -eq 'audio' -and -not $hasPart) -or ($hasPart -and $Matches[1] -eq $part)) { return [int]$p.ProcessId }
+      }
+      return 0
+    }
     $when = if ($j.beat) { [datetime]$j.beat } else { [datetime]$j.startedAt }
     if (((Get-Date) - $when).TotalMinutes -lt 45) { return 0 }
     $pr = Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue
