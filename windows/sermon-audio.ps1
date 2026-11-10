@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.7'
+$Version = '1.9.8'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -75,6 +75,7 @@ function Status-FromLog([string]$m) {
   elseif ($t -match '^Reels: getting captions for (.+)$') { $St.current = 'Getting captions: ' + $Matches[1] }
   elseif ($t -match '^Reels: making reel #(\d+) from (.+)$') { $St.current = "Making reel #$($Matches[1]): $($Matches[2])" }
   elseif ($t -match '^Posts: making the (.+)$') { $St.current = 'Making the ' + $Matches[1] }
+  elseif ($t -match '^Facebook: posting the full sermon (.+)$') { $St.current = 'Facebook video: ' + $Matches[1] }
   elseif ($t -match '^Done: ') { $St.audio++; Problem-Fixed }
   elseif ($t -match '^Reel #\d+ made|^Made \d+ file') { $St.reels++; Problem-Fixed }
   elseif ($t -match '^(Problem|Reel problem)[^:]*: (.+)$|^Could not ask|doesn.t accept this computer') { $St.lastProblem = $t; $St.lastProblemAt = (Get-Date -Format o); $St.Remove('lastProblemFixedAt') }
@@ -599,6 +600,8 @@ $script:FbLast = @{ at = [datetime]::MinValue; stage = '' }
 function FB-Progress([string]$id, [string]$stage, [double]$pct) {
   if ($stage -eq $script:FbLast.stage -and ((Get-Date) - $script:FbLast.at).TotalSeconds -lt 45) { return }
   $script:FbLast = @{ at = (Get-Date); stage = $stage }
+  # 1.9.8: the status window on this computer shows the same progress bar as the manager
+  $St.fb = @{ id = $id; stage = $stage; pct = [int][Math]::Round($pct); at = (Get-Date -Format o) }
   Save-Status
   try { Api '/api/fbvideo/progress' @{ id = $id; stage = $stage; pct = [Math]::Round($pct) } | Out-Null } catch {}
 }
@@ -766,6 +769,7 @@ function Reel-Work([string]$only) {
       if ($msg -match 'download failed|captions failed') { $script:PauseUntil = (Get-Date).AddMinutes(45); break }  # YouTube is probably blocking; try again later
     } finally {
       if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+      if ($St.ContainsKey('fb')) { $St.Remove('fb'); Save-Status }
     }
   }
   if ($Part -ne 'audio') { $St.current = 'Watching for new ' + $Part; Save-Status }

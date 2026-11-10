@@ -10,7 +10,7 @@
 # Keep this file plain ASCII: Windows PowerShell 5.1 reads scripts without a BOM as ANSI. Special characters are
 # made with [char] codes or XML entities.
 #
-# TrayVersion 2.1.0
+# TrayVersion 2.2.0
 param([switch]$Show)
 
 $ErrorActionPreference = 'Continue'
@@ -113,13 +113,25 @@ function Next-Check {
   return $null
 }
 
-# What one part is doing: @{ state = working|watching|idle; text }
+$FbStages = @{ download = 'Downloading from YouTube'; encode = 'Editing the video'; upload = 'Uploading to Facebook'; processing = 'Facebook is processing it' }
+# What one part is doing: @{ state = working|watching|idle; text; pct (Facebook video only) }
 function Part-State([string]$part) {
   $s = Read-Part $part
   if (Part-Running $MutexOf[$part]) {
     $cur = if ($s -and $s.current) { [string]$s.current } else { 'Starting' }
     if ($cur -match '^(Watching for new|Checking for) ') { return @{ state = 'watching'; text = 'Waiting for new work (it looks once a minute)' } }
     if ($cur -eq 'Starting') { return @{ state = 'working'; text = 'Starting' } }
+    # 2.2.0: the full Facebook video's progress, like the bar on the manager (program 1.9.8+ writes it)
+    $fb = if ($s.fb -and $s.fb.stage) { @{ stage = [string]$s.fb.stage; pct = [int]$s.fb.pct } } else { $null }
+    # a helper from before 1.9.8 doesn't write it: use the manager's figures (the window asks once a minute)
+    if (-not $fb -and $part -eq 'posts' -and $script:Overview -and $script:Overview.facebook.progress) {
+      $op = @($script:Overview.facebook.progress)[0]
+      if ($op -and $op.stage) { $fb = @{ stage = [string]$op.stage; pct = [int]$op.pct } }
+    }
+    if ($fb) {
+      $label = if ($FbStages[$fb.stage]) { $FbStages[$fb.stage] } else { $fb.stage }
+      return @{ state = 'working'; text = $cur + ' ' + $Mid + ' ' + $label + ' ' + $Mid + ' ' + $fb.pct + '%'; pct = $fb.pct }
+    }
     return @{ state = 'working'; text = $cur }
   }
   if ($s -and $s.finishedAt) { return @{ state = 'idle'; text = 'Not running ' + $Mid + ' last finished ' + (When $s.finishedAt) } }
@@ -408,7 +420,7 @@ function Rule {
 function Add([System.Windows.Controls.Panel]$p, $child) { [void]$p.Children.Add($child) }
 
 # one row: dot | title + text (+ list) | pill
-function Row([string]$dot, [string]$title, [string]$text, $pill, [string[]]$items = @(), [int]$more = 0, [switch]$Busy) {
+function Row([string]$dot, [string]$title, [string]$text, $pill, [string[]]$items = @(), [int]$more = 0, [switch]$Busy, [int]$Pct = -1) {
   $d = New-Object System.Windows.Controls.DockPanel
   $d.LastChildFill = $true
   if ($pill) { [System.Windows.Controls.DockPanel]::SetDock($pill, 'Right'); Add $d $pill }
@@ -420,7 +432,8 @@ function Row([string]$dot, [string]$title, [string]$text, $pill, [string[]]$item
   if ($more -gt 0) { $x = T ("    and $more more") 13 'Normal' $Muted; $x.Margin = New-Object System.Windows.Thickness 0, 2, 0, 0; Add $st $x }
   if ($Busy) {
     $pb = New-Object System.Windows.Controls.ProgressBar
-    $pb.IsIndeterminate = $true; $pb.Height = 4; $pb.Margin = New-Object System.Windows.Thickness 0, 7, 8, 0
+    if ($Pct -ge 0) { $pb.Minimum = 0; $pb.Maximum = 100; $pb.Value = $Pct; $pb.Height = 8 } else { $pb.IsIndeterminate = $true; $pb.Height = 4 }
+    $pb.Margin = New-Object System.Windows.Thickness 0, 7, 8, 0
     $pb.Foreground = B '#4D7FC0'; $pb.Background = B '#E6ECF4'; $pb.BorderThickness = New-Object System.Windows.Thickness 0
     Add $st $pb
   }
@@ -468,7 +481,7 @@ function Fill-Status($sum) {
 $PartNames = [ordered]@{ audio = 'Sermon audio'; reels = 'Instagram reels'; posts = 'Posts and Facebook videos' }
 function Fill-Parts {
   $rows = @()
-  foreach ($p in $PartNames.Keys) { $ps = Part-State $p; $rows += @{ p = $p; st = $ps.state; text = $ps.text } }
+  foreach ($p in $PartNames.Keys) { $ps = Part-State $p; $rows += @{ p = $p; st = $ps.state; text = $ps.text; pct = $(if ($null -ne $ps.pct) { [int]$ps.pct } else { -1 }) } }
   $s = Read-Status; $hr = Read-Helper 'reels'; $hp = Read-Helper 'posts'
   $counts = ''
   if ($s -and $s.state -eq 'running') {
@@ -481,7 +494,7 @@ function Fill-Parts {
   foreach ($r in $rows) {
     if (-not $first) { Add $UI.Parts (Rule) }; $first = $false
     switch ($r.st) {
-      'working' { Add $UI.Parts (Row '#2E6EDC' $PartNames[$r.p] $r.text (Pill 'Working' '#EAF1FB' '#1F3A5F') -Busy) }
+      'working' { Add $UI.Parts (Row '#2E6EDC' $PartNames[$r.p] $r.text (Pill 'Working' '#EAF1FB' '#1F3A5F') -Busy -Pct $r.pct) }
       'watching' { Add $UI.Parts (Row '#7FA6D9' $PartNames[$r.p] $r.text (Pill 'Ready' '#EEF2F7' '#3D5577')) }
       default { Add $UI.Parts (Row '#B8BFCC' $PartNames[$r.p] $r.text (Pill 'Idle' '#F0F2F5' '#5B6475')) }
     }

@@ -85,3 +85,29 @@ jobs:
           if (-not $got) { throw 'could not take the mutex over' }
           Kill-Tree $reels.Id
           Write-Host 'Old-style stuck posts helper found by command line and stopped; the reels helper left alone.'
+      - name: The status window shows the Facebook video's progress (tray 2.2.0)
+        shell: powershell
+        run: |
+          $src = Get-Content windows\status-tray.ps1 -Raw
+          Invoke-Expression ([regex]::Match($src, '(?s)\$FbStages = .*?\n').Value)
+          Invoke-Expression ([regex]::Match($src, '(?s)function Part-State.*?\n}\r?\n').Value)
+          $Mid = '-'; $MutexOf = @{ posts = 'x' }
+          function Part-Running($n) { $true }
+          function When($x) { 'earlier' }
+          # from the local status file (program 1.9.8+)
+          function Read-Part($p) { [pscustomobject]@{ current = 'Facebook video: DNA 14'; fb = [pscustomobject]@{ stage = 'encode'; pct = 34 } } }
+          $r = Part-State 'posts'
+          Write-Host $r.text
+          if ($r.pct -ne 34 -or $r.text -notmatch 'Editing the video - 34%') { throw 'local progress not shown' }
+          # from the manager (older helper, no fb in its file)
+          function Read-Part($p) { [pscustomobject]@{ current = 'Checking for posts' } }
+          function Read-Part($p) { [pscustomobject]@{ current = 'Facebook video: DNA 14' } }
+          $script:Overview = '{"facebook":{"progress":[{"stage":"upload","pct":72}]}}' | ConvertFrom-Json
+          $r = Part-State 'posts'
+          Write-Host $r.text
+          if ($r.pct -ne 72 -or $r.text -notmatch 'Uploading to Facebook - 72%') { throw 'manager progress not shown' }
+          # no progress anywhere: plain text, no bar value
+          $script:Overview = $null
+          $r = Part-State 'posts'
+          if ($null -ne $r.pct) { throw 'a bar value appeared with no progress' }
+          Write-Host 'Facebook progress shown in the status window.'
