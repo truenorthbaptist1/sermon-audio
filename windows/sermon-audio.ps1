@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.8'
+$Version = '1.9.9'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -603,11 +603,13 @@ function FB-Progress([string]$id, [string]$stage, [double]$pct) {
   # 1.9.8: the status window on this computer shows the same progress bar as the manager
   $St.fb = @{ id = $id; stage = $stage; pct = [int][Math]::Round($pct); at = (Get-Date -Format o) }
   Save-Status
-  try { Api '/api/fbvideo/progress' @{ id = $id; stage = $stage; pct = [Math]::Round($pct) } | Out-Null } catch {}
+  # 1.9.9: the manager says "stop" when the sermon was marked as already on Facebook (or handed elsewhere)
+  try { $r = Api '/api/fbvideo/progress' @{ id = $id; stage = $stage; pct = [Math]::Round($pct) }; if ($r -and $r.stop) { $script:FbStop = $true } } catch {}
 }
 
 function FB-Video($job, [string]$work) {
   $script:FbLast = @{ at = [datetime]::MinValue; stage = '' }
+  $script:FbStop = $false
   FB-Progress $job.id 'download' 1
   Prepare-Art $job $work
   [IO.File]::WriteAllText((Join-Path $work 'endcard.ass'), [string]$job.endcard, (New-Object Text.UTF8Encoding($false)))
@@ -681,6 +683,11 @@ function FB-Video($job, [string]$work) {
   $url = "$videoHost/$($job.page.api)/$($job.page.id)/videos"
   $tok = [string]$job.page.token
   try {
+    # 1.9.9 (Nov 13): last check before uploading, so a sermon already on the Page (marked "Already on Facebook"
+    # in the manager, or found there) is never posted twice
+    $chk = $null
+    try { $chk = Api '/api/fbvideo/progress' @{ id = $job.id; stage = 'upload'; pct = 65 } } catch {}
+    if ($script:FbStop -or ($chk -and $chk.stop)) { Log "  Not uploading $($job.title): the manager says it's already on Facebook."; return }
     FB-Progress $fbId 'upload' 65
     $st = Fb-Form $client $url @{ access_token = $tok; upload_phase = 'start'; file_size = [string]$size } $null
     $session = [string]$st.upload_session_id; $videoId = [string]$st.video_id
