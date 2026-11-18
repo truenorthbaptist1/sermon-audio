@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.10'
+$Version = '1.9.11'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -712,20 +712,30 @@ function FB-Video($job, [string]$work) {
     [void](Fb-Form $client $url @{ access_token = $tok; upload_phase = 'finish'; upload_session_id = $session
         title = [string]$job.fbTitle; description = [string]$job.description; published = 'true' } $null)
     FB-Progress $fbId 'processing' 96
+    # 1.9.11 (Nov 17): always wait for Facebook to finish processing (up to 45 minutes). If Facebook says the video
+    # failed, report the failure with its reason instead of "posted" (a failed one showed as posted but wasn't on the Page).
+    $vs = ''; $why = ''
+    for ($w = 0; $w -lt 90; $w++) {
+      try {
+        $sr = $client.GetAsync("$graphHost/$($job.page.api)/$videoId" + '?fields=status&access_token=' + [Uri]::EscapeDataString($tok)).Result
+        $sj = $sr.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+        $vs = [string]$sj.status.video_status
+        if ($vs -eq 'error') {
+          foreach ($ph in 'uploading_phase', 'processing_phase', 'publishing_phase') {
+            $e = $sj.status.$ph.errors; if ($e) { $why = (@($e) | ForEach-Object { [string]$_.message }) -join '; '; break }
+          }
+          break
+        }
+        if ($vs -eq 'ready') { break }
+      } catch {}
+      FB-Progress $fbId 'processing' 97
+      Start-Sleep -Seconds 30
+    }
+    if ($vs -eq 'error') { throw ('Facebook could not process the video' + $(if ($why) { ": $why" } else { '' }) + " (video $videoId). Try again.") }
+    if ($vs -ne 'ready') { Log "  Facebook is still processing $($job.title) after 45 minutes (status: '$vs'); it should appear on the Page when it's done." }
     # the series thumbnail as the cover (a cover problem never stops the post). 1.9.1: Facebook ignores a cover
-    # sent while it is still processing the video, so wait until the video is ready (up to 20 minutes), then try
-    # up to 3 times.
+    # sent while it is still processing the video, so the wait above comes first; then try up to 3 times.
     if ($hasThumb) {
-      for ($w = 0; $w -lt 40; $w++) {
-        try {
-          $sr = $client.GetAsync("$graphHost/$($job.page.api)/$videoId" + '?fields=status&access_token=' + [Uri]::EscapeDataString($tok)).Result
-          $sj = $sr.Content.ReadAsStringAsync().Result | ConvertFrom-Json
-          $vs = [string]$sj.status.video_status
-          if ($vs -eq 'ready' -or $vs -eq 'error') { break }
-        } catch {}
-        FB-Progress $fbId 'processing' 97
-        Start-Sleep -Seconds 30
-      }
       for ($c = 1; $c -le 3; $c++) {
         try {
           $form = New-Object System.Net.Http.MultipartFormDataContent
