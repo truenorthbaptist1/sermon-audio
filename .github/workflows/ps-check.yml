@@ -18,6 +18,24 @@ jobs:
           }
           if ($bad) { exit 1 }
           Write-Host 'All scripts parse.'
+      - name: Facebook progress works while the caller has its own $st (1.9.10, Nov 17)
+        shell: powershell
+        run: |
+          $src = Get-Content windows\sermon-audio.ps1 -Raw
+          # PowerShell names ignore case: a local $st anywhere but the status record itself shadows $St
+          $hits = [regex]::Matches($src, '(?im)^\s*\$st\s*=') | Where-Object { $_.Value -notmatch '\$St = @\{' -and $_.Value -notmatch 'script:' }
+          $lines = Select-String -Path windows\sermon-audio.ps1 -Pattern '^\s*\$st\s*=' | Where-Object { $_.Line -notmatch '^\$St = @\{' -and $_.Line -notmatch '\$St = \$script:St' }
+          if ($lines) { $lines | ForEach-Object { Write-Host "local `$st at line $($_.LineNumber): $($_.Line.Trim())" }; exit 1 }
+          $StatusFile = Join-Path $env:TEMP 'n17-status.json'
+          $script:St = @{ version = 'test'; part = 'posts' }
+          foreach ($f in 'Save-Status', 'FB-Progress') { Invoke-Expression ([regex]::Match($src, "(?s)function $f.*?\n}\r?\n").Value) }
+          function Api($p, $b) { return @{ ok = $true } }
+          $script:FbLast = @{ at = [datetime]::MinValue; stage = '' }
+          function Caller { $st = [pscustomobject]@{ upload_session_id = 'x' }; FB-Progress 'vid1' 'upload' 65; return $st.upload_session_id }
+          $r = Caller
+          $saved = Get-Content $StatusFile -Raw | ConvertFrom-Json
+          Write-Host "caller kept '$r'; saved fb = $($saved.fb.stage) $($saved.fb.pct)"
+          if ($r -ne 'x' -or $saved.fb.stage -ne 'upload' -or $saved.fb.pct -ne 65 -or $script:St.fb.id -ne 'vid1') { exit 1 }
       - name: Run-ToolWatch calls its tick while a tool runs
         shell: powershell
         run: |

@@ -20,7 +20,7 @@
 
 param([switch]$Show, [ValidateSet('audio', 'reels', 'posts')][string]$Part = 'audio')
 
-$Version = '1.9.9'
+$Version = '1.9.10'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -55,6 +55,7 @@ try { $old = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json; if 
 # 1.9.3: the internet being down (not YouTube, not the program) - the window explains it in plain words
 $NoInternet = 'getaddrinfo failed|Failed to resolve|could not be resolved|No such host is known|Name or service not known|Temporary failure in name resolution|Unable to connect to the remote server|Network is unreachable|No connection could be made|No route to host'
 function Save-Status {
+  $St = $script:St   # 1.9.10: the script's status record, even if the caller has a variable called $st
   $St.beat = (Get-Date -Format o)  # 1.9.6: proof of life; a part with no beat for 45 minutes is stuck
   try {
     $tmp = $StatusFile + '.tmp'
@@ -426,11 +427,11 @@ function Caption-Words([string]$id, [string]$work) {
     $dur = if ($ev.dDurationMs) { [double]$ev.dDurationMs } else { 2000 }
     $segs = @($ev.segs | Where-Object { $_.utf8 -and $_.utf8.Trim() })
     for ($k = 0; $k -lt $segs.Count; $k++) {
-      $st = $t0 + [double]$segs[$k].tOffsetMs
+      $segStart = $t0 + [double]$segs[$k].tOffsetMs
       $en = if ($k + 1 -lt $segs.Count) { $t0 + [double]$segs[$k + 1].tOffsetMs } else { $t0 + $dur }
       $ws = @($segs[$k].utf8.Trim() -split '\s+' | Where-Object { $_ })
       for ($q = 0; $q -lt $ws.Count; $q++) {
-        $wt = $st + ($en - $st) * $q / $ws.Count
+        $wt = $segStart + ($en - $segStart) * $q / $ws.Count
         [void]$sb.Append(([Math]::Round($wt)).ToString($Inv)).Append("`t").Append($ws[$q]).Append("`n")
         $count++
       }
@@ -601,7 +602,7 @@ function FB-Progress([string]$id, [string]$stage, [double]$pct) {
   if ($stage -eq $script:FbLast.stage -and ((Get-Date) - $script:FbLast.at).TotalSeconds -lt 45) { return }
   $script:FbLast = @{ at = (Get-Date); stage = $stage }
   # 1.9.8: the status window on this computer shows the same progress bar as the manager
-  $St.fb = @{ id = $id; stage = $stage; pct = [int][Math]::Round($pct); at = (Get-Date -Format o) }
+  $script:St.fb = @{ id = $id; stage = $stage; pct = [int][Math]::Round($pct); at = (Get-Date -Format o) }
   Save-Status
   # 1.9.9: the manager says "stop" when the sermon was marked as already on Facebook (or handed elsewhere)
   try { $r = Api '/api/fbvideo/progress' @{ id = $id; stage = $stage; pct = [Math]::Round($pct) }; if ($r -and $r.stop) { $script:FbStop = $true } } catch {}
@@ -689,9 +690,11 @@ function FB-Video($job, [string]$work) {
     try { $chk = Api '/api/fbvideo/progress' @{ id = $job.id; stage = 'upload'; pct = 65 } } catch {}
     if ($script:FbStop -or ($chk -and $chk.stop)) { Log "  Not uploading $($job.title): the manager says it's already on Facebook."; return }
     FB-Progress $fbId 'upload' 65
-    $st = Fb-Form $client $url @{ access_token = $tok; upload_phase = 'start'; file_size = [string]$size } $null
-    $session = [string]$st.upload_session_id; $videoId = [string]$st.video_id
-    $from = [long]$st.start_offset; $to = [long]$st.end_offset
+    # 1.9.10 (Nov 17): this was $st, which PowerShell treats as the same name as the status record $St, so the
+    # progress report right after it failed ("The property 'fb' cannot be found") and every upload stopped there
+    $upStart = Fb-Form $client $url @{ access_token = $tok; upload_phase = 'start'; file_size = [string]$size } $null
+    $session = [string]$upStart.upload_session_id; $videoId = [string]$upStart.video_id
+    $from = [long]$upStart.start_offset; $to = [long]$upStart.end_offset
     $fs = [IO.File]::OpenRead($out)
     try {
       while ($from -lt $to) {
@@ -776,7 +779,7 @@ function Reel-Work([string]$only) {
       if ($msg -match 'download failed|captions failed') { $script:PauseUntil = (Get-Date).AddMinutes(45); break }  # YouTube is probably blocking; try again later
     } finally {
       if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
-      if ($St.ContainsKey('fb')) { $St.Remove('fb'); Save-Status }
+      if ($script:St.ContainsKey('fb')) { $script:St.Remove('fb'); Save-Status }
     }
   }
   if ($Part -ne 'audio') { $St.current = 'Watching for new ' + $Part; Save-Status }
